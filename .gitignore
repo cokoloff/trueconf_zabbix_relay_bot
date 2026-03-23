@@ -1,37 +1,26 @@
-# Virtual Environment
-venv/
-.venv/
-env/
-ENV/
+# Конфигурация (не коммитим!)
+config.local.py
+.env
 
-# Python cache
+# Данные
+data/
+logs/
+*.json
+
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
-
-# Project state
-bot_state.json
-bot_state_*.json
-bot_state_*.json.gz
-backups/
-
-# Logs
-logs/
-*.log
-
-# Environment
-.env
-.env.local
-.env.production
 
 # OS
 .DS_Store

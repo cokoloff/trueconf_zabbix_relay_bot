@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-TRUECONF ZABBIX RELAY BOT - ФИНАЛЬНАЯ ВЕРСИЯ 10.0
-═══════════════════════════════════════════════════════════════════════════════
-
-ФИНАЛЬНАЯ ВЕРСИЯ:
-✅ Принимает только: channel, subject, message
-✅ Отправляет ТОЛЬКО то, что получил - без изменений
-✅ Никакого добавления времени, ID и служебной информации
-✅ Полное администрирование через команды бота
-✅ Heartbeat для стабильного соединения
-✅ Поддержка каналов для разных типов уведомлений
-"""
-
 import asyncio
 import logging
 import json
@@ -39,7 +26,7 @@ import config
 # КОНСТАНТЫ И НАСТРОЙКИ
 # ============================================================================
 
-VERSION = "10.0"
+VERSION = "10.1"
 
 # Кэшируем настройки
 _CONFIG_CACHE = {
@@ -48,6 +35,16 @@ _CONFIG_CACHE = {
     'HEARTBEAT_MODE': getattr(config, 'HEARTBEAT_MODE', 'smart'),
     'ADMIN_IDS': getattr(config, 'ADMIN_IDS', '').split(',') if getattr(config, 'ADMIN_IDS', '') else [],
     'ADMIN_MODE': getattr(config, 'ADMIN_MODE', 'strict')
+}
+
+# Настройки для получения токена
+TOKEN_CONFIG = {
+    'token_url': getattr(config, 'TRUECONF_TOKEN_URL', 'https://vcs.your-domain.ru/bridge/api/client/v1/oauth/token'),
+    'client_id': getattr(config, 'TRUECONF_CLIENT_ID', 'chat_bot'),
+    'username': getattr(config, 'TRUECONF_USERNAME', 'your-bot-usernam'),
+    'password': getattr(config, 'TRUECONF_PASSWORD', 'your-bot-password'),
+    'server': getattr(config, 'TRUECONF_SERVER', 'vcs.your-domain.ru'),
+    'token_file': getattr(config, 'TOKEN_FILE', 'bot_token.json')
 }
 
 # ============================================================================
@@ -63,6 +60,7 @@ bot = None
 bot_keepalive = None
 state_manager = None
 admin_manager = None
+token_manager = None
 start_time = None
 bot_task = None
 web_runner = None
@@ -147,6 +145,155 @@ def setup_logging() -> ContextLogger:
     return ContextLogger('bot')
 
 logger = setup_logging()
+
+# ============================================================================
+# МЕНЕДЖЕР ТОКЕНОВ (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# ============================================================================
+
+class TokenManager:
+    """Управление получением и обновлением токена"""
+    
+    def __init__(self):
+        self.token = None
+        self.expires_at = None
+        self.token_file = Path(TOKEN_CONFIG['token_file'])
+        self._lock = asyncio.Lock()
+        self._refresh_task = None
+        
+        # Загружаем сохраненный токен
+        self._load_token()
+    
+    def _load_token(self):
+        """Загружает токен из файла"""
+        try:
+            if self.token_file.exists():
+                with open(self.token_file, 'r') as f:
+                    data = json.load(f)
+                    self.token = data.get('token')
+                    expires_at_str = data.get('expires_at')
+                    if expires_at_str:
+                        self.expires_at = datetime.fromisoformat(expires_at_str)
+                    
+                    if self.token and self.expires_at:
+                        remaining = (self.expires_at - datetime.now()).total_seconds()
+                        if remaining > 3600:
+                            logger.info(f"✅ Загружен токен из файла (действителен {remaining/3600:.1f} ч)")
+                            return
+                        else:
+                            logger.info(f"⚠️ Токен истекает через {remaining/60:.0f} мин")
+            else:
+                logger.info("📁 Файл с токеном не найден")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка загрузки токена: {e}")
+        
+        self.token = None
+        self.expires_at = None
+    
+    def _save_token(self):
+        """Сохраняет токен в файл"""
+        try:
+            data = {
+                'token': self.token,
+                'expires_at': self.expires_at.isoformat() if self.expires_at else None,
+                'updated_at': datetime.now().isoformat()
+            }
+            with open(self.token_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.debug("💾 Токен сохранен в файл")
+        except Exception as e:
+            logger.error(f"❌ Ошибка сохранения токена: {e}")
+    
+    def is_token_valid(self) -> bool:
+        """Проверяет, действителен ли токен"""
+        if not self.token or not self.expires_at:
+            return False
+        
+        # Считаем токен действительным, если до истечения > 5 минут
+        remaining = (self.expires_at - datetime.now()).total_seconds()
+        return remaining > 300  # 5 минут
+    
+    async def get_token(self, force_refresh: bool = False) -> Optional[str]:
+        """Получает токен, обновляя если нужно"""
+        async with self._lock:
+            # Если не принудительное обновление и токен действителен - возвращаем
+            if not force_refresh and self.is_token_valid():
+                return self.token
+            
+            # Получаем новый токен
+            try:
+                async with aiohttp.ClientSession() as session:
+                    payload = {
+                        "client_id": TOKEN_CONFIG['client_id'],
+                        "grant_type": "password",
+                        "username": TOKEN_CONFIG['username'],
+                        "password": TOKEN_CONFIG['password']
+                    }
+                    
+                    logger.info(f"🔑 Запрос токена для {TOKEN_CONFIG['username']}...")
+                    
+                    async with session.post(
+                        TOKEN_CONFIG['token_url'],
+                        json=payload,
+                        headers={'Content-Type': 'application/json'}
+                    ) as response:
+                        if response.status in (200, 201):
+                            data = await response.json()
+                            self.token = data.get('access_token')
+                            
+                            # Получаем expires_at
+                            expires_at_value = data.get('expires_at')
+                            if expires_at_value:
+                                if isinstance(expires_at_value, (int, float)):
+                                    self.expires_at = datetime.fromtimestamp(expires_at_value)
+                                else:
+                                    try:
+                                        self.expires_at = datetime.fromisoformat(expires_at_value)
+                                    except:
+                                        self.expires_at = datetime.now() + timedelta(days=30)
+                            else:
+                                self.expires_at = datetime.now() + timedelta(days=30)
+                            
+                            self._save_token()
+                            
+                            expires_days = (self.expires_at - datetime.now()).total_seconds() / 86400
+                            logger.info(f"✅ Токен получен (действителен {expires_days:.0f} дней)")
+                            return self.token
+                        else:
+                            error_text = await response.text()
+                            logger.error(f"❌ Ошибка получения токена: {response.status} - {error_text[:200]}")
+                            return None
+                            
+            except Exception as e:
+                logger.error(f"❌ Ошибка запроса токена: {e}")
+                return None
+    
+    def start_auto_refresh(self):
+        """Запускает фоновую проверку токена (только для логирования)"""
+        async def monitor_loop():
+            while True:
+                try:
+                    await asyncio.sleep(3600)  # Проверяем раз в час
+                    
+                    if not self.is_token_valid():
+                        logger.warning("⚠️ Токен истекает или недействителен, обновляем...")
+                        await self.get_token(force_refresh=True)
+                    
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"❌ Ошибка мониторинга токена: {e}")
+        
+        self._refresh_task = asyncio.create_task(monitor_loop())
+        logger.info("🔄 Запущен мониторинг токена (проверка раз в час)")
+    
+    async def stop(self):
+        """Останавливает мониторинг"""
+        if self._refresh_task:
+            self._refresh_task.cancel()
+            try:
+                await self._refresh_task
+            except:
+                pass
 
 # ============================================================================
 # СИСТЕМА АДМИНИСТРИРОВАНИЯ
@@ -328,7 +475,7 @@ class BotKeepAlive:
             except ValueError:
                 self.mode = HeartbeatMode.SMART
         
-        self.check_interval = config.HEARTBEAT_INTERVAL
+        self.check_interval = getattr(config, 'HEARTBEAT_INTERVAL', 30)
         self.failures = 0
         self.max_failures = 3
         self.reconnects = 0
@@ -407,31 +554,47 @@ class BotKeepAlive:
         }
 
 # ============================================================================
-# ПАТЧЕР
+# СОЗДАНИЕ БОТА С ТОКЕНОМ
 # ============================================================================
 
-class TrueConfBotPatcher:
-    _patched = set()
+async def create_bot_with_token():
+    """Создает бота, получая токен через API"""
+    global token_manager
     
-    @classmethod
-    def patch_bot(cls, bot):
-        bot_id = id(bot)
-        if bot_id in cls._patched:
-            return bot
+    token = await token_manager.get_token()
+    if not token:
+        logger.error("❌ Не удалось получить токен")
+        return None
+    
+    try:
+        bot = Bot(
+            server=TOKEN_CONFIG['server'],
+            token=token,
+            dispatcher=dp
+        )
         
-        original = bot.send_message
+        # Патчим бота
+        original_send = bot.send_message
         
-        async def patched(*args, **kwargs):
+        async def patched_send(*args, **kwargs):
             try:
-                return await original(*args, **kwargs)
+                return await original_send(*args, **kwargs)
             except Exception as e:
-                if 'connection' in str(e).lower():
-                    logger.debug(f"⚠️ Ошибка отправки: {e}")
+                if 'token' in str(e).lower() or 'unauthorized' in str(e).lower():
+                    logger.warning("⚠️ Ошибка авторизации, обновляем токен...")
+                    new_token = await token_manager.get_token(force_refresh=True)
+                    if new_token:
+                        # Обновляем токен в боте
+                        bot._token = new_token
+                        return await original_send(*args, **kwargs)
                 raise
         
-        bot.send_message = patched
-        cls._patched.add(bot_id)
+        bot.send_message = patched_send
         return bot
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания бота: {e}")
+        return None
 
 # ============================================================================
 # ИКОНКИ ДЛЯ КАНАЛОВ
@@ -453,7 +616,7 @@ def get_channel_icon(channel: str) -> str:
     return icons.get(channel.lower(), '📢')
 
 # ============================================================================
-# ОТПРАВКА УВЕДОМЛЕНИЙ - ТОЛЬКО ТО, ЧТО ПРИШЛО
+# ОТПРАВКА УВЕДОМЛЕНИЙ
 # ============================================================================
 
 async def send_notification(chat_id: str, subject: str, message: str, channel: str = None) -> bool:
@@ -466,7 +629,7 @@ async def send_notification(chat_id: str, subject: str, message: str, channel: s
     channel_icon = get_channel_icon(channel) if channel else ''
     channel_prefix = f"{channel_icon} " if channel_icon else ''
     
-    # Формируем сообщение: если есть subject - выделяем его жирным
+    # Формируем сообщение
     if subject:
         final_message = f"{channel_prefix}{subject}\n{message}"
     else:
@@ -490,7 +653,7 @@ async def send_notification(chat_id: str, subject: str, message: str, channel: s
     return False
 
 # ============================================================================
-# ВЕБХУК ОБРАБОТЧИК - ТОЛЬКО ТРИ ПАРАМЕТРА
+# ВЕБХУК ОБРАБОТЧИК
 # ============================================================================
 
 async def handle_webhook(request):
@@ -505,7 +668,7 @@ async def handle_webhook(request):
         
         logger.info(f"📩 Получен вебхук: {json.dumps(data, ensure_ascii=False)}")
         
-        # Извлекаем параметры (поддерживаем разные регистры)
+        # Извлекаем параметры
         channel = data.get('channel') or data.get('Channel') or data.get('CHANNEL')
         subject = data.get('subject') or data.get('Subject') or data.get('SUBJECT') or data.get('trigger') or ''
         message = data.get('message') or data.get('Message') or data.get('MESSAGE')
@@ -591,7 +754,8 @@ async def cmd_help(msg, args):
         text += "• `/default` - чат по умолчанию\n"
         text += "• `/admins` - список администраторов\n"
         text += "• `/admin_add <id>` - добавить админа\n"
-        text += "• `/admin_remove <id>` - удалить админа\n\n"
+        text += "• `/admin_remove <id>` - удалить админа\n"
+        text += "• `/token_info` - информация о токене\n\n"
         
         text += "**📝 Формат вебхука:**\n"
         text += "Бот принимает три параметра:\n"
@@ -619,10 +783,24 @@ async def cmd_info(msg, args):
     uptime = datetime.now() - start_time
     metadata = state_manager._state['metadata']
     
+    # Информация о токене
+    token_status = "✅ Активен" if token_manager.token else "❌ Не получен"
+    if token_manager.token and token_manager.expires_at:
+        remaining = (token_manager.expires_at - datetime.now()).total_seconds()
+        if remaining > 0:
+            token_status = f"✅ Действителен {remaining/86400:.0f} дней"
+        else:
+            token_status = "⚠️ Истек"
+    
     text = f"**🤖 TrueConf Zabbix Bot v{VERSION}**\n\n"
     text += f"**Статус:** {'✅ Активен' if bot_ready else '⚠️ Неактивен'}\n"
     text += f"**⏱️ Uptime:** {str(uptime).split('.')[0]}\n"
-    text += f"**🌐 Сервер:** {config.TRUECONF_SERVER}\n\n"
+    text += f"**🌐 Сервер:** {TOKEN_CONFIG['server']}\n\n"
+    
+    text += f"**🔑 Токен:** {token_status}\n"
+    if token_manager.expires_at:
+        expires_in = (token_manager.expires_at - datetime.now()).total_seconds()
+        text += f"**📅 Истекает:** {token_manager.expires_at.strftime('%Y-%m-%d %H:%M:%S')} (через {expires_in/86400:.0f} дн)\n\n"
     
     text += f"**📊 Статистика:**\n"
     text += f"• Каналов: {len(state_manager.notification_channels)}\n"
@@ -634,6 +812,26 @@ async def cmd_info(msg, args):
     
     text += "**📝 Режим работы:**\n"
     text += "Бот отправляет ТОЛЬКО то, что получил - без добавления времени и ID"
+    
+    await msg.answer(text, parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_token_info(msg, args):
+    """Информация о токене"""
+    if not admin_manager.is_admin(getattr(msg.author, 'id', None)):
+        await msg.answer("🚫 Доступ запрещен", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    if token_manager.token and token_manager.expires_at:
+        remaining = (token_manager.expires_at - datetime.now()).total_seconds()
+        text = f"**🔑 Информация о токене**\n\n"
+        text += f"**Статус:** ✅ Активен\n"
+        text += f"**Истекает:** {token_manager.expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        text += f"**Осталось:** {remaining/86400:.1f} дней ({remaining/3600:.1f} часов)\n"
+        text += f"**Токен:** `{token_manager.token[:20]}...{token_manager.token[-10:]}`\n\n"
+        
+        text += f"**Автообновление:** ✅ активно (проверка каждые 6 часов)"
+    else:
+        text = "❌ **Токен не получен**"
     
     await msg.answer(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -764,6 +962,7 @@ _COMMAND_HANDLERS = {
     '/health': cmd_health,
     '/ping': cmd_ping,
     '/whoami': cmd_whoami,
+    '/token_info': cmd_token_info,
     '/register': cmd_register,
     '/unregister': cmd_unregister,
     '/channels': cmd_channels,
@@ -785,7 +984,6 @@ async def handle_messages(msg: Message):
     
     _processed_commands.append(message_id)
     
-    # Безопасный вызов update_activity
     if bot_keepalive:
         try:
             bot_keepalive.update_activity()
@@ -836,12 +1034,21 @@ async def start_web_server():
     app.router.add_get('/health', lambda _: web.Response(text="OK"))
     
     async def handle_root(request):
+        token_status = "active" if token_manager.token else "inactive"
+        if token_manager.token and token_manager.expires_at:
+            remaining = (token_manager.expires_at - datetime.now()).total_seconds()
+            if remaining > 0:
+                token_status = f"valid for {remaining/86400:.0f} days"
+            else:
+                token_status = "expired"
+        
         return web.json_response({
             "name": "TrueConf Zabbix Relay Bot",
             "version": VERSION,
             "status": "running",
             "bot_ready": bot_ready,
             "mode": "minimal",
+            "token_status": token_status,
             "description": "Бот отправляет ТОЛЬКО то, что получил - без добавления времени и ID",
             "webhook_format": {
                 "required": ["message"],
@@ -869,23 +1076,40 @@ async def start_web_server():
 # ============================================================================
 
 async def main():
-    global bot, bot_keepalive, state_manager, admin_manager
+    global bot, bot_keepalive, state_manager, admin_manager, token_manager
     global start_time, bot_task, web_runner, bot_ready, is_shutting_down
     
     start_time = datetime.now()
     bot_ready = False
     is_shutting_down = False
+    
+    # Инициализация менеджеров
+    token_manager = TokenManager()
     state_manager = StateManager()
     admin_manager = AdminManager()
     
     logger.info("=" * 60)
-    logger.info(f"🚀 TrueConf Zabbix Bot v{VERSION} - МИНИМАЛЬНАЯ ВЕРСИЯ")
+    logger.info(f"🚀 TrueConf Zabbix Bot v{VERSION} - С АВТО-ТОКЕНОМ")
     logger.info("=" * 60)
     logger.info(f"⚙️  Настройки:")
+    logger.info(f"   🌐 Сервер: {TOKEN_CONFIG['server']}")
+    logger.info(f"   🔑 URL токена: {TOKEN_CONFIG['token_url']}")
+    logger.info(f"   👤 Пользователь: {TOKEN_CONFIG['username']}")
     logger.info(f"   💓 Heartbeat: {_CONFIG_CACHE['HEARTBEAT_MODE']}")
     logger.info(f"   📋 LOG_LEVEL: {_CONFIG_CACHE['LOG_LEVEL']}")
     logger.info(f"   🔐 ADMIN_MODE: {admin_manager.mode}")
     logger.info(f"   👑 Администраторов: {len(admin_manager.admin_ids)}")
+    logger.info("=" * 60)
+    
+    # Получаем токен
+    token = await token_manager.get_token()
+    if not token:
+        logger.error("❌ Не удалось получить токен. Бот не будет запущен.")
+        return
+    
+    # Запускаем автообновление токена
+    token_manager.start_auto_refresh()
+    
     logger.info("=" * 60)
     logger.info("📝 Формат вебхука:")
     logger.info("   {")
@@ -897,12 +1121,30 @@ async def main():
     logger.info("=" * 60)
     
     try:
+        # Создаем бота
         bot = Bot(
-            server=config.TRUECONF_SERVER,
-            token=config.TRUECONF_TOKEN,
+            server=TOKEN_CONFIG['server'],
+            token=token,
             dispatcher=dp
         )
-        bot = TrueConfBotPatcher.patch_bot(bot)
+        
+        # Патчим бота для автоматического обновления токена
+        original_send = bot.send_message
+        
+        async def patched_send(*args, **kwargs):
+            try:
+                return await original_send(*args, **kwargs)
+            except Exception as e:
+                error_msg = str(e).lower()
+                if 'token' in error_msg or 'unauthorized' in error_msg or 'auth' in error_msg:
+                    logger.warning("⚠️ Ошибка авторизации, обновляем токен...")
+                    new_token = await token_manager.get_token(force_refresh=True)
+                    if new_token:
+                        bot._token = new_token
+                        return await original_send(*args, **kwargs)
+                raise
+        
+        bot.send_message = patched_send
         
         bot_keepalive = BotKeepAlive(bot)
         await bot_keepalive.start()
@@ -924,6 +1166,9 @@ async def main():
         
         if bot_keepalive:
             await bot_keepalive.stop()
+        
+        if token_manager:
+            await token_manager.stop()
         
         if web_runner:
             await web_runner.cleanup()

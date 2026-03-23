@@ -1,15 +1,2 @@
-# TrueConf Bot SDK
-python-trueconf-bot>=1.1.1
-# Web framework
+python-trueconf-bot>=1.1.6
 aiohttp>=3.9.0
-# HTTP requests
-requests>=2.31.0
-# Environment variables
-python-dotenv>=1.0.0
-# Graylog integration (optional)
-graypy>=2.1.0
-
-asyncio>=3.4.3
-
-# For Windows - colorama
-colorama>=0.4.6 ; platform_system == "Windows"

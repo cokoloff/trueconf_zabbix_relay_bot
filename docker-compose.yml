@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  trueconf-bot:
+    build: .
+    container_name: trueconf-zabbix-bot
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Опционально: можно смонтировать config.local.py для сложных настроек
+      #- ./config.local.py:/app/config.local.py:ro
+    environment:
+      # Все настройки через ENV
+      - TRUECONF_SERVER=${TRUECONF_SERVER:-vcs.your-domain.ru}
+      - TRUECONF_TOKEN_URL=${TRUECONF_TOKEN_URL:-https://vcs.your-domain.ru/bridge/api/client/v1/oauth/token}
+      - TRUECONF_CLIENT_ID=${TRUECONF_CLIENT_ID:-chat_bot}
+      - TRUECONF_USERNAME=${TRUECONF_USERNAME:-your_username_here}
+      - TRUECONF_PASSWORD=${TRUECONF_PASSWORD}
+      - ADMIN_MODE=${ADMIN_MODE:-strict}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TZ=Europe/Moscow
+    env_file:
+      - .env  # опционально
