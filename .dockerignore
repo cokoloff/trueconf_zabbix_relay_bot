@@ -1,0 +1,42 @@
+# Секреты и состояние — никогда не попадают в образ
+.env
+.env.*
+!.env.example
+bot_token.json
+bot_state.json
+bot_state*.json
+bot_outbox.json
+local-admin-initial-password.txt
+
+# Логи и бэкапы
+logs/
+logs_*
+backups/
+*.log
+
+# Разработка
+.git/
+.github/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pydeps/
+.wheelhouse/
+.piptmp/
+.pipcache/
+.sdk_ref/
+
+# Тесты и документация не нужны в рантайме
+scripts/
+docs/
+tests/
+*.md
+!README.md
+docker-compose*.yml
+
+# Прочее
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,2 +1,13 @@
-python-trueconf-bot>=1.1.6
+# TrueConf Bot SDK (>=1.5.5: авто-переподключение, health-check, таймауты запросов)
+python-trueconf-bot>=1.5.5,<2.0
+# Web framework
 aiohttp>=3.9.0
+# Environment variables
+python-dotenv>=1.0.0
+# Форматирование/совместимость типов для SDK
+typing_extensions>=4.16.0
+# Проверка подписи токенов Keycloak (RS256 по JWKS)
+PyJWT[crypto]>=2.8
+
+# For Windows - colorama
+colorama>=0.4.6 ; platform_system == "Windows"

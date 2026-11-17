@@ -1,27 +1,62 @@
-version: '3.8'
+# ============================================================================
+# TrueConf Zabbix Relay Bot — запуск в контейнере
+#
+#   cp .env.example .env      # заполнить TRUECONF_SERVER и TRUECONF_PASSWORD
+#   docker compose up -d --build
+#
+# Состояние, токен и очередь сохраняются в томе tcbot-data.
+# ============================================================================
 
 services:
-  trueconf-bot:
-    build: .
-    container_name: trueconf-zabbix-bot
+  tcbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: trueconf-zabbix-relay-bot:latest
+    container_name: tcbot
     restart: unless-stopped
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      # Опционально: можно смонтировать config.local.py для сложных настроек
-      #- ./config.local.py:/app/config.local.py:ro
-    environment:
-      # Все настройки через ENV
-      - TRUECONF_SERVER=${TRUECONF_SERVER:-vcs.your-domain.ru}
-      - TRUECONF_TOKEN_URL=${TRUECONF_TOKEN_URL:-https://vcs.your-domain.ru/bridge/api/client/v1/oauth/token}
-      - TRUECONF_CLIENT_ID=${TRUECONF_CLIENT_ID:-chat_bot}
-      - TRUECONF_USERNAME=${TRUECONF_USERNAME:-your_username_here}
-      - TRUECONF_PASSWORD=${TRUECONF_PASSWORD}
-      - ADMIN_MODE=${ADMIN_MODE:-strict}
-      - ADMIN_IDS=${ADMIN_IDS}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - TZ=Europe/Moscow
+
     env_file:
-      - .env  # опционально
+      - .env
+
+    environment:
+      # Пути внутри контейнера (перекрывают значения из .env)
+      LOG_DIR: /app/logs
+      STATE_FILE: /app/data/bot_state.json
+      TOKEN_FILE: /app/data/bot_token.json
+      OUTBOX_FILE: /app/data/bot_outbox.json
+      LOCAL_ADMIN_PASSWORD_FILE: /app/data/local-admin-initial-password.txt
+      WEB_SERVER_HOST: 0.0.0.0
+      WEB_SERVER_PORT: "8080"
+
+    ports:
+      # Панель управления и приём вебхуков.
+      # Наружу обычно нужен только вебхук, панель прячут за reverse proxy.
+      - "8080:8080"
+
+    volumes:
+      - tcbot-data:/app/data
+      - tcbot-logs:/app/logs
+
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    # Ограничения: бот нетребователен, этих лимитов хватает с запасом
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+volumes:
+  tcbot-data:
+  tcbot-logs:

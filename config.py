@@ -1,123 +1,264 @@
-# config.py
-# Универсальная конфигурация для работы на сервере и в контейнере
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Конфигурация TrueConf Zabbix Relay Bot.
+
+Версия 12.0 — все параметры читаются из окружения (.env), значения по умолчанию
+подобраны для python-trueconf-bot >= 1.5.5.
+"""
+
 import os
-import sys
-from pathlib import Path
 
-def load_config():
+from dotenv import load_dotenv
+
+load_dotenv()
+
+VERSION = "12.0"
+
+# ============================================================================
+# ОСНОВНЫЕ НАСТРОЙКИ
+# ============================================================================
+
+TRUECONF_SERVER = os.getenv("TRUECONF_SERVER", "trueconf.example.com")
+TRUECONF_PORT = int(os.getenv("TRUECONF_PORT", "443")) or None  # None → 443 для https
+
+TRUECONF_TOKEN_URL = os.getenv(
+    "TRUECONF_TOKEN_URL", "https://trueconf.example.com/bridge/api/client/v1/oauth/token"
+)
+TRUECONF_CLIENT_ID = os.getenv("TRUECONF_CLIENT_ID", "chat_bot")
+TRUECONF_USERNAME = os.getenv("TRUECONF_USERNAME", "trueconf-bot")
+TRUECONF_PASSWORD = os.getenv("TRUECONF_PASSWORD", "")
+TOKEN_FILE = os.getenv("TOKEN_FILE", "bot_token.json")
+
+def _parse_verify_ssl(value: str):
     """
-    Загрузка конфигурации в порядке приоритета:
-    1. Переменные окружения (ENV)
-    2. Файл config.py (если есть)
-    3. Значения по умолчанию
+    Проверка TLS-сертификата сервера.
+
+        VERIFY_SSL=true        — проверять по системному хранилищу (truststore)
+        VERIFY_SSL=false       — не проверять (самоподписанный сертификат)
+        VERIFY_SSL=/path/ca.pem — проверять по указанному CA-бандлу
     """
-    
-    # Базовые значения по умолчанию
-    defaults = {
-        # TrueConf настройки
-        'TRUECONF_SERVER': 'vcs.your-domain.ru',
-        'TRUECONF_TOKEN_URL': 'https://vcs.your-domain.ru/bridge/api/client/v1/oauth/token',
-        'TRUECONF_CLIENT_ID': 'chat_bot',
-        'TRUECONF_USERNAME': 'your_username_here',
-        'TRUECONF_PASSWORD': '',
-        'TOKEN_FILE': 'bot_token.json',
-        
-        # Веб-сервер
-        'WEB_SERVER_HOST': '0.0.0.0',
-        'WEB_SERVER_PORT': 8080,
-        
-        # Логирование
-        'LOG_LEVEL': 'INFO',
-        'WEBSOCKET_DEBUG': False,
-        
-        # Heartbeat
-        'HEARTBEAT_MODE': 'smart',
-        'HEARTBEAT_INTERVAL': 30,
-        
-        # Администрирование
-        'ADMIN_MODE': 'strict',
-        'ADMIN_IDS': [],
-    }
-    
-    # Пытаемся загрузить из файла config.local.py (если есть)
-    local_config = {}
-    config_file = Path(__file__).parent / 'config.local.py'
-    if config_file.exists():
-        try:
-            # Выполняем файл как модуль
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("local_config", config_file)
-            local_config_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(local_config_module)
-            
-            # Забираем все переменные в верхнем регистре
-            for key, value in local_config_module.__dict__.items():
-                if key.isupper():
-                    local_config[key] = value
-            print(f"✅ Загружена конфигурация из {config_file}")
-        except Exception as e:
-            print(f"⚠️ Ошибка загрузки {config_file}: {e}")
-    
-    # Формируем финальную конфигурацию
-    config = {}
-    for key, default_value in defaults.items():
-        # 1. Проверяем ENV
-        env_value = os.getenv(key)
-        if env_value is not None:
-            # Преобразуем типы
-            if isinstance(default_value, bool):
-                value = env_value.lower() in ('true', '1', 'yes', 'on')
-            elif isinstance(default_value, int):
-                value = int(env_value)
-            elif isinstance(default_value, list):
-                value = [v.strip() for v in env_value.split(',') if v.strip()]
-            else:
-                value = env_value
-            config[key] = value
-            continue
-        
-        # 2. Проверяем local_config
-        if key in local_config:
-            config[key] = local_config[key]
-            continue
-        
-        # 3. Используем значение по умолчанию
-        config[key] = default_value
-    
-    return config
+    raw = (value or "").strip()
+    if raw.lower() in ("1", "true", "yes", "on"):
+        return True
+    if raw.lower() in ("0", "false", "no", "off", ""):
+        return False
+    return raw  # путь к файлу с CA
 
-# Загружаем конфигурацию
-_config = load_config()
 
-# Экспортируем переменные для удобного импорта
-TRUECONF_SERVER = _config['TRUECONF_SERVER']
-TRUECONF_TOKEN_URL = _config['TRUECONF_TOKEN_URL']
-TRUECONF_CLIENT_ID = _config['TRUECONF_CLIENT_ID']
-TRUECONF_USERNAME = _config['TRUECONF_USERNAME']
-TRUECONF_PASSWORD = _config['TRUECONF_PASSWORD']
-TOKEN_FILE = _config['TOKEN_FILE']
-WEB_SERVER_HOST = _config['WEB_SERVER_HOST']
-WEB_SERVER_PORT = _config['WEB_SERVER_PORT']
-LOG_LEVEL = _config['LOG_LEVEL']
-WEBSOCKET_DEBUG = _config['WEBSOCKET_DEBUG']
-HEARTBEAT_MODE = _config['HEARTBEAT_MODE']
-HEARTBEAT_INTERVAL = _config['HEARTBEAT_INTERVAL']
-ADMIN_MODE = _config['ADMIN_MODE']
-ADMIN_IDS = _config['ADMIN_IDS']
+VERIFY_SSL = _parse_verify_ssl(os.getenv("VERIFY_SSL", "false"))
 
-# Вывод информации о загрузке
-print("=" * 60)
-print("🚀 TrueConf Zabbix Bot - Загрузка конфигурации")
-print("=" * 60)
-print(f"📁 Источники:")
-if os.getenv('TRUECONF_SERVER'):
-    print(f"   🌐 ENV переменные: активны")
-if Path(__file__).parent / 'config.local.py':
-    print(f"   📄 config.local.py: {'найден' if (Path(__file__).parent / 'config.local.py').exists() else 'не найден'}")
-print(f"   ⚙️  Значения по умолчанию: активны")
-print("-" * 60)
-print(f"🌐 Сервер: {TRUECONF_SERVER}")
-print(f"🔐 Режим администрирования: {ADMIN_MODE}")
-print(f"👑 Администраторы: {len(ADMIN_IDS)}")
-print(f"📋 Уровень логирования: {LOG_LEVEL}")
-print("=" * 60)
+# ID чата по умолчанию (можно оставить пустым, установить через команду /default)
+GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "0000000000000000000000000000000000000000")
+
+STATE_FILE = os.getenv("STATE_FILE", "bot_state.json")
+
+# ============================================================================
+# АДМИНИСТРИРОВАНИЕ
+# ============================================================================
+
+# Режим администрирования: strict, whitelist, open
+ADMIN_MODE = os.getenv("ADMIN_MODE", "strict")
+
+# Список администраторов (через запятую). Эти записи нельзя удалить из бота.
+ADMIN_IDS = os.getenv("ADMIN_IDS", "admin@example.com,admin2@example.com")
+
+# ============================================================================
+# ВЕБ-СЕРВЕР И ПАНЕЛЬ УПРАВЛЕНИЯ
+# ============================================================================
+
+WEB_SERVER_HOST = os.getenv("WEB_SERVER_HOST", "0.0.0.0")
+WEB_SERVER_PORT = int(os.getenv("WEB_SERVER_PORT", "8080"))
+
+# Если задан — API панели требует заголовок X-WebUI-Token или ?token=
+WEBUI_TOKEN = os.getenv("WEBUI_TOKEN", "")
+
+# Внешний адрес панели (для redirect_uri в Keycloak), например https://tcbot.example.com
+WEBUI_PUBLIC_URL = os.getenv("WEBUI_PUBLIC_URL", "")
+
+# ============================================================================
+# SSO (Keycloak)
+# ============================================================================
+# Режим авторизации панели:
+#   both     — SSO Keycloak + локальный администратор (рекомендуется)
+#   keycloak — только Keycloak
+#   local    — только локальный администратор
+#   token    — статический токен WEBUI_TOKEN
+#   none     — без авторизации (только закрытый контур)
+WEBUI_AUTH = os.getenv("WEBUI_AUTH", "token" if WEBUI_TOKEN else "none")
+
+# ============================================================================
+# ЛОКАЛЬНЫЙ АДМИНИСТРАТОР (резервный вход без Keycloak)
+# ============================================================================
+LOCAL_ADMIN_ENABLED = os.getenv("LOCAL_ADMIN_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+LOCAL_ADMIN_USERNAME = os.getenv("LOCAL_ADMIN_USERNAME", "local-admin")
+
+# Пароль в открытом виде — только для первого запуска (сразу сохраняется как хэш)
+LOCAL_ADMIN_PASSWORD = os.getenv("LOCAL_ADMIN_PASSWORD", "")
+
+# Готовый хэш пароля (приоритетнее открытого пароля). Получить:
+#   python -c "from tcbot.localadmin import hash_password; print(hash_password('пароль'))"
+LOCAL_ADMIN_PASSWORD_HASH = os.getenv("LOCAL_ADMIN_PASSWORD_HASH", "")
+
+# Файл, куда однократно записывается автоматически сгенерированный пароль
+LOCAL_ADMIN_PASSWORD_FILE = os.getenv("LOCAL_ADMIN_PASSWORD_FILE", "local-admin-initial-password.txt")
+
+SSO_SERVER_URL = os.getenv("SSO_SERVER_URL", "https://auth.example.com")
+SSO_REALM = os.getenv("SSO_REALM", "aquarius")
+SSO_CLIENT_ID = os.getenv("SSO_CLIENT_ID", "tcbot-admin")
+# Для public-клиента с PKCE секрет не нужен; если клиент confidential — задайте
+SSO_CLIENT_SECRET = os.getenv("SSO_CLIENT_SECRET", "")
+# Переопределение redirect_uri (иначе WEBUI_PUBLIC_URL + /auth/callback)
+SSO_REDIRECT_URI = os.getenv("SSO_REDIRECT_URI", "")
+
+# Роли Keycloak (realm или клиента), дающие доступ
+SSO_ADMIN_ROLES = os.getenv("SSO_ADMIN_ROLES", "tcbot-admin")
+SSO_VIEWER_ROLES = os.getenv("SSO_VIEWER_ROLES", "tcbot-viewer")
+# ВАЖНО: scope 'roles' и 'groups' нужны, чтобы Keycloak положил роли и группы
+# в токен. Без них пользователь войдёт, но ролей не будет.
+SSO_SCOPE = os.getenv("SSO_SCOPE", "openid profile email roles groups")
+
+# Время жизни сессии панели (сек)
+SSO_SESSION_TTL = int(os.getenv("SSO_SESSION_TTL", str(8 * 3600)))
+# Флаг Secure для cookie (включайте, если панель работает по HTTPS)
+SSO_COOKIE_SECURE = os.getenv("SSO_COOKIE_SECURE", "false").lower() in ("1", "true", "yes", "on")
+# Секрет подписи cookie; если пусто — генерируется при старте (сессии сбросятся при рестарте)
+SSO_SESSION_SECRET = os.getenv("SSO_SESSION_SECRET", "")
+
+# ============================================================================
+# ЛОГИРОВАНИЕ
+# ============================================================================
+
+LOG_DIR = os.getenv("LOG_DIR", "logs")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+WEBSOCKET_DEBUG = os.getenv("WEBSOCKET_DEBUG", "False").lower() == "true"
+
+# ============================================================================
+# СВЯЗЬ С СЕРВЕРОМ: HEARTBEAT, WATCHDOG, ПЕРЕПОДКЛЮЧЕНИЕ
+# ============================================================================
+
+# Режим heartbeat: off, smart, strict
+#   off    — только события SDK (переподключение по обрыву)
+#   smart  — плюс активная проверка связи; перезапуск после 3 подряд неудач (рекомендуется)
+#   strict — перезапуск немедленно после первой неудачной проверки
+HEARTBEAT_MODE = os.getenv("HEARTBEAT_MODE", "smart")
+
+# Как часто проверять соединение активным запросом (сек)
+HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "30"))
+
+# Как часто проверять состояние событий SDK (сек)
+WATCHDOG_INTERVAL = int(os.getenv("WATCHDOG_INTERVAL", "15"))
+
+# Порог бездействия: сколько секунд без авторизации считаются сбоем (сек)
+IDLE_THRESHOLD = int(os.getenv("IDLE_THRESHOLD", "300"))
+
+# Попыток подряд до принудительного обновления токена
+MAX_RECONNECT_ATTEMPTS = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "10"))
+
+# Начальная задержка перед переподключением (сек)
+RECONNECT_DELAY = float(os.getenv("RECONNECT_DELAY", "5"))
+
+# Во сколько раз растёт пауза после каждой неудачной попытки
+RECONNECT_BACKOFF = float(os.getenv("RECONNECT_BACKOFF", "2.0"))
+
+# Потолок паузы (сек). 1800 = 30 минут: при плановых работах сервер может быть
+# недоступен часами, поэтому после нескольких попыток темп снижается до 1 раза в полчаса.
+RECONNECT_MAX_DELAY = float(os.getenv("RECONNECT_MAX_DELAY", "1800"))
+
+# Окно «частых» попыток (сек): пока простой меньше — пауза растёт экспоненциально,
+# после — сразу RECONNECT_MAX_DELAY. 600 = 10 минут.
+RECONNECT_FAST_WINDOW = float(os.getenv("RECONNECT_FAST_WINDOW", "600"))
+
+# Через сколько секунд непрерывного простоя перейти в «тихий» режим:
+# в error.log пишется только первая ошибка, остальное — в GUI и bot.log.
+QUIET_AFTER = float(os.getenv("QUIET_AFTER", "600"))
+
+# Таймаут активной проверки соединения (сек)
+PING_TIMEOUT = float(os.getenv("PING_TIMEOUT", "10"))
+
+# Переподключение внутри SDK: число попыток и максимальная пауза (сек)
+WS_MAX_RETRIES = int(os.getenv("WS_MAX_RETRIES", "5"))
+WS_MAX_DELAY = int(os.getenv("WS_MAX_DELAY", "60"))
+
+# Таймаут ожидания ответа сервера на API-запрос (сек)
+SDK_TIMEOUT = float(os.getenv("SDK_TIMEOUT", "15"))
+
+# Получать непрочитанные сообщения при подключении
+RECEIVE_UNREAD_MESSAGES = os.getenv("RECEIVE_UNREAD_MESSAGES", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+# ============================================================================
+# ОЧЕРЕДЬ НЕДОСТАВЛЕННЫХ УВЕДОМЛЕНИЙ
+# ============================================================================
+# Пока TrueConf недоступен, уведомления складываются на диск и выгружаются
+# после восстановления связи. Очередь переживает перезапуск процесса.
+OUTBOX_ENABLED = os.getenv("OUTBOX_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+OUTBOX_FILE = os.getenv("OUTBOX_FILE", "bot_outbox.json")
+
+# Максимум сообщений в очереди (старейшие вытесняются)
+OUTBOX_MAX_SIZE = int(os.getenv("OUTBOX_MAX_SIZE", "5000"))
+
+# Сколько часов хранить недоставленное (старше — удаляется)
+OUTBOX_TTL_HOURS = float(os.getenv("OUTBOX_TTL_HOURS", "48"))
+
+# Окно дедупликации идентичных уведомлений (сек), 0 — выключено
+OUTBOX_DEDUP_WINDOW = float(os.getenv("OUTBOX_DEDUP_WINDOW", "120"))
+
+# Период фоновой выгрузки очереди (сек)
+OUTBOX_FLUSH_INTERVAL = float(os.getenv("OUTBOX_FLUSH_INTERVAL", "5"))
+
+# Схлопывать несколько обновлений по одному триггеру в одно (останется последнее)
+OUTBOX_COLLAPSE = os.getenv("OUTBOX_COLLAPSE", "true").lower() in ("1", "true", "yes", "on")
+
+# ============================================================================
+# ДОСТАВКА УВЕДОМЛЕНИЙ
+# ============================================================================
+
+# Таймаут одной отправки сообщения (сек)
+SEND_TIMEOUT = float(os.getenv("SEND_TIMEOUT", "20"))
+
+# Количество попыток отправки и базовая пауза между ними (сек)
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+RETRY_DELAY = float(os.getenv("RETRY_DELAY", "1.0"))
+
+# Сколько секунд вебхук ждёт восстановления связи, прежде чем вернуть 503
+WEBHOOK_WAIT_TIMEOUT = float(os.getenv("WEBHOOK_WAIT_TIMEOUT", "20"))
+
+# ============================================================================
+# КОМАНДЫ
+# ============================================================================
+
+COMMAND_TIMEOUT = float(os.getenv("COMMAND_TIMEOUT", "15"))
+
+# ============================================================================
+# УДАЛЕНИЕ СООБЩЕНИЙ ОБ ОШИБКАХ
+# ============================================================================
+
+DELETE_MESSAGES_ENABLED = os.getenv("DELETE_MESSAGES_ENABLED", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+ERROR_DELETE_THRESHOLD_HOURS = float(os.getenv("ERROR_DELETE_THRESHOLD_HOURS", "24"))
+ERROR_HISTORY_RETENTION_DAYS = int(os.getenv("ERROR_HISTORY_RETENTION_DAYS", "7"))
+ERROR_CLEANUP_SCHEDULE_HOUR = int(os.getenv("ERROR_CLEANUP_SCHEDULE_HOUR", "3"))
+
+# ============================================================================
+# ПРОВЕРКА
+# ============================================================================
+
+if not TRUECONF_SERVER:
+    print("❌ ОШИБКА: TRUECONF_SERVER не указан!")
+
+if not TRUECONF_PASSWORD:
+    print("⚠️ ПРЕДУПРЕЖДЕНИЕ: TRUECONF_PASSWORD не задан — токен не будет получен")
+
+print("✅ Конфигурация загружена")
+print(f"   🌐 Сервер: {TRUECONF_SERVER}")
+print(f"   🔐 Режим администрирования: {ADMIN_MODE}")
+print(f"   💓 Heartbeat: {HEARTBEAT_MODE} / {HEARTBEAT_INTERVAL} с")
