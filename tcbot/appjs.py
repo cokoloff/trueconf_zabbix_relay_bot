@@ -1044,6 +1044,15 @@ APP_JS = r"""
       badge.className = 'badge badge-count' + (problems ? ' badge-warn' : '');
     }
 
+    var summary = $('diag-ch-summary');
+    if (summary && data) {
+      var parts = ['всего: ' + (data.total || 0)];
+      if (data.inspected != null) parts.push('проверено: ' + data.inspected);
+      if (data.skipped) parts.push('не успели: ' + data.skipped);
+      if (data.cached) parts.push('из кэша: ' + data.cached);
+      summary.textContent = parts.join(' · ');
+    }
+
     if (!items.length) {
       body.innerHTML = '<tr><td colspan="6"><div class="empty-cell">' +
         (data && data.error ? escapeHtml(data.error) : 'каналов нет') + '</div></td></tr>';
@@ -1051,8 +1060,11 @@ APP_JS = r"""
     }
 
     body.innerHTML = items.map(function (item) {
-      var broken = !item.ok;
-      var style = broken ? ' style="background:var(--err-bg)"' : '';
+      var skipped = (item.reason || '').indexOf('не проверен') === 0 ||
+                    (item.reason || '').indexOf('не проверялся') === 0;
+      var broken = !item.ok && !skipped;
+      var style = broken ? ' style="background:var(--err-bg)"'
+                : (skipped ? ' style="opacity:.55"' : '');
       var botCell = item.bot_is_member === true
         ? '<span class="ok">участник</span>' + (item.bot_role ? ' <span class="dim fs-11">(' + escapeHtml(item.bot_role) + ')</span>' : '')
         : (item.bot_is_member === false ? '<span class="err">нет</span>' : '<span class="dim">—</span>');
@@ -1164,6 +1176,15 @@ APP_JS = r"""
   function initDiagnosticsHandlers() {
     on('diag-refresh', 'click', function () {
       loadDiagnostics().then(function () { toast('Данные обновлены'); })
+        .catch(function (e) { toast(e.message, true); });
+    });
+    /* Полная перепроверка каналов в обход кэша */
+    on('diag-recheck', 'click', function () {
+      api('/api/diagnostics?part=channels&fresh=1&budget=40')
+        .then(function (result) {
+          renderDiagChannels(result.data);
+          toast('Каналы проверены заново');
+        })
         .catch(function (e) { toast(e.message, true); });
     });
   }

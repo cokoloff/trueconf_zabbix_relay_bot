@@ -708,8 +708,10 @@ code {
 .diag-h {
   font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
   color: var(--text-muted); margin: 0 0 8px; font-weight: 600;
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
+.diag-h .spacer { flex: 1 1 auto; }
+.diag-h button { text-transform: none; letter-spacing: 0; }
 .badge-warn { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
 
 /* ---------------- Заголовок страницы раздела ---------------- */

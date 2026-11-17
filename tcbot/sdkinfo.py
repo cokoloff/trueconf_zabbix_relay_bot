@@ -20,7 +20,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +37,12 @@ CHAT_TYPES = {
     5: "избранное",
     6: "групповой",
 }
+
+# Сколько секунд держать результат проверки канала
+CACHE_TTL = 60
+
+# Причины, по которым канал не считается проблемным
+SKIP_REASONS = ("не проверялся (лимит)", "не проверен: не хватило времени")
 
 # Роли участников
 CHAT_ROLES = {
@@ -118,8 +126,13 @@ class SdkInspector:
     недоступного чата.
     """
 
+    #: Сколько секунд держать результат проверки канала
+    CACHE_TTL = CACHE_TTL
+
     def __init__(self, bot_getter) -> None:
         self._bot_getter = bot_getter
+        # name -> (время проверки, результат)
+        self._channel_cache: Dict[str, Any] = {}
 
     @property
     def bot(self):
@@ -171,84 +184,146 @@ class SdkInspector:
     async def channel_health(
         self,
         channels: Dict[str, Dict[str, Any]],
-        inspect_limit: int = 12,
+        inspect_limit: int = 0,
+        budget_seconds: float = 20.0,
+        concurrency: int = 6,
+        use_cache: bool = True,
     ) -> Dict[str, Any]:
         """
         Проверяет каналы бота через SDK.
 
-        Для каждого канала (до inspect_limit) выясняет: существует ли чат,
-        как он называется, сколько в нём участников и состоит ли там бот.
-        Это сразу показывает каналы, ведущие в никуда.
+        Для каждого канала выясняет: существует ли чат, как он называется,
+        сколько в нём участников и состоит ли там бот. Сразу показывает каналы,
+        ведущие в никуда.
+
+        Проверка идёт параллельно (concurrency запросов), поэтому даже
+        два-три десятка каналов укладываются в секунды. Ограничения:
+
+            inspect_limit   — 0 = без ограничения по количеству
+            budget_seconds  — общий лимит времени; что не успели, помечается
+            use_cache       — кэш на CACHE_TTL секунд, чтобы «Обновить»
+                              не дёргал сервер заново
+
+        Время важнее полноты: лучше показать часть каналов сразу, чем
+        держать панель в ожидании.
         """
         bot = self.bot
         if bot is None:
             return {"available": False, "items": []}
 
-        items: List[ChannelInfo] = []
+        now = time.time()
+        names = list(channels.keys())
+
+        # --- кэш ------------------------------------------------------ #
+        cached: Dict[str, ChannelInfo] = {}
+        if use_cache and self._channel_cache:
+            for name in names:
+                hit = self._channel_cache.get(name)
+                if hit and now - hit[0] < self.CACHE_TTL:
+                    cached[name] = hit[1]
+
+        pending = [name for name in names if name not in cached]
+        if inspect_limit and inspect_limit > 0:
+            pending = pending[:inspect_limit]
+
         try:
             me_id = bot.me_id
         except Exception:
             me_id = None
 
-        for index, (name, info) in enumerate(channels.items()):
+        results: Dict[str, ChannelInfo] = dict(cached)
+        skipped: List[str] = []
+        deadline = time.monotonic() + max(1.0, budget_seconds)
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+
+        async def check(name: str) -> None:
+            nonlocal skipped
+            info = channels.get(name) or {}
             chat_id = str(info.get("chat_id", ""))
             entry = ChannelInfo(name=name, chat_id=chat_id)
 
             if not chat_id:
                 entry.reason = "не задан chat_id"
-                items.append(entry)
-                continue
+                results[name] = entry
+                return
 
-            if index >= inspect_limit:
-                # Сверх лимита не проверяем, но не считаем проблемой
-                entry.reason = "не проверялся (лимит)"
-                items.append(entry)
-                continue
+            if time.monotonic() > deadline:
+                skipped.append(name)
+                return
 
-            try:
-                chat = await bot.get_chat_by_id(chat_id)
-            except Exception as exc:
-                entry.reason = f"чат не найден: {type(exc).__name__}"
-                items.append(entry)
-                continue
+            async with semaphore:
+                if time.monotonic() > deadline:
+                    skipped.append(name)
+                    return
+                await self._check_one(bot, me_id, entry, chat_id)
+            results[name] = entry
 
-            entry.ok = True
-            entry.title = getattr(chat, "title", None)
-            entry.chat_type = _chat_type_name(getattr(chat, "chat_type", None))
-            entry.unread = getattr(chat, "unread_messages", None)
-            last = getattr(chat, "last_message", None)
-            entry.last_message_at = getattr(last, "timestamp", None) if last else None
+        await asyncio.gather(*(check(name) for name in pending), return_exceptions=True)
 
-            try:
-                parts = await bot.get_chat_participants(
-                    chat_id=chat_id, page_size=20, page_number=1
-                )
-                plist = getattr(parts, "participants", []) or []
-                entry.participants = len(plist)
-                for participant in plist:
-                    if me_id and getattr(participant, "user_id", None) == me_id:
-                        entry.bot_is_member = True
-                        entry.bot_role = _role_name(getattr(participant, "role", None))
-                        break
-                else:
-                    entry.bot_is_member = False
-            except Exception:
-                entry.participants = 0
-                entry.bot_is_member = None
+        # Отмечаем то, что не успели проверить
+        for name in skipped:
+            info = channels.get(name) or {}
+            entry = ChannelInfo(name=name, chat_id=str(info.get("chat_id", "")))
+            entry.reason = "не проверен: не хватило времени"
+            results[name] = entry
 
-            items.append(entry)
+        # Обновляем кэш
+        for name, entry in results.items():
+            if entry.reason != "не проверен: не хватило времени":
+                self._channel_cache[name] = (now, entry)
+
+        items = [results[name] for name in names if name in results]
 
         problems = [
             item for item in items
-            if not item.ok and item.reason != "не проверялся (лимит)"
+            if not item.ok and item.reason not in SKIP_REASONS
         ]
+
         return {
             "available": True,
             "total": len(channels),
-            "inspected": min(len(channels), inspect_limit),
+            "inspected": len(items) - len(skipped),
+            "skipped": len(skipped),
+            "cached": len(cached),
             "problems": len(problems),
             "items": [item.to_dict() for item in items],
         }
+
+    async def _check_one(self, bot, me_id, entry: "ChannelInfo", chat_id: str) -> None:
+        """Проверяет один канал: чат, участники, наличие бота."""
+        try:
+            chat = await bot.get_chat_by_id(chat_id)
+        except Exception as exc:
+            entry.reason = f"чат не найден: {type(exc).__name__}"
+            return
+
+        entry.ok = True
+        entry.title = getattr(chat, "title", None)
+        entry.chat_type = _chat_type_name(getattr(chat, "chat_type", None))
+        entry.unread = getattr(chat, "unread_messages", None)
+        last = getattr(chat, "last_message", None)
+        entry.last_message_at = getattr(last, "timestamp", None) if last else None
+
+        try:
+            parts = await bot.get_chat_participants(
+                chat_id=chat_id, page_size=50, page_number=1
+            )
+            plist = getattr(parts, "participants", []) or []
+            entry.participants = len(plist)
+            for participant in plist:
+                if me_id and getattr(participant, "user_id", None) == me_id:
+                    entry.bot_is_member = True
+                    entry.bot_role = _role_name(getattr(participant, "role", None))
+                    break
+            else:
+                entry.bot_is_member = False
+        except Exception:
+            entry.participants = 0
+            entry.bot_is_member = None
+
+    def invalidate_channel_cache(self) -> None:
+        """Сбрасывает кэш проверок (например, после правки каналов)."""
+        self._channel_cache.clear()
 
     async def limits(self) -> Dict[str, Any]:
         """Ограничения сервера на файлы."""

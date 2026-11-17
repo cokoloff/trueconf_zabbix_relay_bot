@@ -232,6 +232,9 @@ DIAGNOSTICS_CARD = r"""<div class="card" id="card-diag">
   <h3 class="diag-h" style="margin-top:18px;">
     Состояние каналов
     <span class="badge badge-count" id="diag-ch-problems">0</span>
+    <span class="dim fs-11" id="diag-ch-summary"></span>
+    <span class="spacer"></span>
+    <button type="button" class="secondary small" id="diag-recheck">Проверить заново</button>
   </h3>
   <p class="dim fs-12" style="margin:0 0 10px;">
     Проверяется, что чат канала существует, сколько в нём участников и состоит

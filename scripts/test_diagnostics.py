@@ -146,18 +146,36 @@ async def main() -> int:
     check("не найден" in items["broken"]["reason"], "причина указана", items["broken"]["reason"])
     check(items["nochat"]["ok"] is False, "пустой chat_id помечен")
 
-    print("\n7) Лимит проверки")
-    health2 = await inspector2.channel_health(channels, inspect_limit=1)
-    limited = [i for i in health2["items"] if i["reason"] == "не проверялся (лимит)"]
-    # Канал с пустым chat_id отсеивается раньше и в лимит не попадает
-    check(len(limited) == 1, "каналы сверх лимита не проверяются", str(len(limited)))
-    check(health2["inspected"] == 1, "счётчик проверенных учитывает лимит",
-          str(health2.get("inspected")))
-    # Непроверенные по лимиту не считаются проблемой: остаётся только
-    # канал с пустым chat_id (он отсеивается до проверки лимита)
-    check(health2["problems"] == 1,
-          "непроверенные по лимиту не считаются проблемой",
-          str(health2.get("problems")))
+    print("\n7) Проверяются все каналы без ограничения по умолчанию")
+    health_all = await inspector2.channel_health(channels)
+    check(health_all["inspected"] == health_all["total"],
+          "по умолчанию проверяются все каналы",
+          str(health_all["inspected"]) + " из " + str(health_all["total"]))
+    check(health_all.get("skipped", 0) == 0, "пропущенных нет")
+    check(health_all["problems"] == 2, "две проблемы найдены",
+          str(health_all.get("problems")))
+
+    print("\n7b) Явное ограничение количества")
+    # Свежий инспектор без кэша: лимит применяется только к каналам,
+    # требующим запроса к серверу; пустой chat_id отсеивается сразу
+    fresh = SdkInspector(lambda: bot2)
+    health_lim = await fresh.channel_health(channels, inspect_limit=1)
+    check(health_lim["inspected"] <= 2, "лимит ограничивает проверку",
+          str(health_lim.get("inspected")))
+    check(health_lim["total"] == 3, "общее количество каналов сохранено",
+          str(health_lim.get("total")))
+
+    print("\n7c) Кэш результатов")
+    inspector3 = SdkInspector(lambda: bot2)
+    await inspector3.channel_health(channels)
+    second = await inspector3.channel_health(channels)
+    check(second.get("cached", 0) > 0, "повторный вызов берёт данные из кэша",
+          str(second.get("cached")))
+    third = await inspector3.channel_health(channels, use_cache=False)
+    check(third.get("cached", 0) == 0, "use_cache=False обходит кэш")
+    inspector3.invalidate_channel_cache()
+    fourth = await inspector3.channel_health(channels)
+    check(fourth.get("cached", 0) == 0, "сброс кэша работает")
 
     print("\n8) История чата")
     history = await inspector2.history("chat-1", count=5)

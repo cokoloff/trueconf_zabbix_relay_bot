@@ -1424,9 +1424,13 @@ async def api_diagnostics(request: web.Request) -> web.Response:
             page=int(request.query.get("page", 1)),
         )
     elif part == "channels":
+        # По умолчанию проверяются ВСЕ каналы (параллельно, с кэшем).
+        # limit=N ограничивает количество, если нужно быстро.
         data = await sdk_inspector.channel_health(
             state_manager.notification_channels,
-            inspect_limit=int(request.query.get("limit", 12)),
+            inspect_limit=int(request.query.get("limit", 0)),
+            budget_seconds=float(request.query.get("budget", 20)),
+            use_cache=request.query.get("fresh") != "1",
         )
     elif part == "limits":
         data = await sdk_inspector.limits()
