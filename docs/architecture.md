@@ -155,6 +155,8 @@ tcbot/
   auth.py             авторизация панели
   sso.py              OIDC-клиент Keycloak
   localadmin.py       локальная учётная запись (PBKDF2)
+  sdkinfo.py          данные из SDK для страницы диагностики
+  metrics.py          история метрик для графиков и календаря
 
 scripts/              офлайн-тесты
 docs/                 документация

@@ -10,6 +10,8 @@ bot_state.tmp
 bot_state_*.json
 bot_outbox.json
 bot_outbox.tmp
+bot_metrics.json
+bot_metrics.tmp
 local-admin-initial-password.txt
 backups/
 

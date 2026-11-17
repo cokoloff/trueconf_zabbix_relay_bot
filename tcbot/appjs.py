@@ -637,6 +637,456 @@ APP_JS = r"""
     });
   }
 
+
+
+  // ---------------------------------------------------------------- графики
+
+  var ChartColors = {
+    pad: { top: 12, right: 12, bottom: 20, left: 40 }
+  };
+
+  function cssVar(name, fallback) {
+    var value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
+  }
+
+  function hexToRgba(color, alpha) {
+    var c = String(color).trim();
+    if (c.charAt(0) === '#') {
+      var hex = c.slice(1);
+      if (hex.length === 3) {
+        hex = hex.split('').map(function (ch) { return ch + ch; }).join('');
+      }
+      var num = parseInt(hex, 16);
+      return 'rgba(' + ((num >> 16) & 255) + ',' + ((num >> 8) & 255) + ',' + (num & 255) + ',' + alpha + ')';
+    }
+    return c;
+  }
+
+  /* Рисует линейный график: без библиотек и CDN. */
+  function drawLine(canvas, points, opts) {
+    if (!canvas) return;
+    var o = opts || {};
+    var field = o.field;
+    var dpr = window.devicePixelRatio || 1;
+    var rect = canvas.getBoundingClientRect();
+    var w = Math.max(120, rect.width || canvas.clientWidth || 300);
+    var h = o.height || 110;
+
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    canvas.style.height = h + 'px';
+
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    var values = (points || []).map(function (p) {
+      return { ts: p.ts, label: p.label, v: p[field] };
+    }).filter(function (p) {
+      return typeof p.v === 'number' && isFinite(p.v);
+    });
+
+    var colorLine = o.color || cssVar('--aq-primary', '#1f4e8c');
+    var colorGrid = cssVar('--border-light', '#dde3ea');
+    var colorText = cssVar('--text-dim', '#8a96a3');
+    var P = ChartColors.pad;
+    var plotW = w - P.left - P.right;
+    var plotH = h - P.top - P.bottom;
+
+    if (!values.length) {
+      ctx.fillStyle = colorText;
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(o.emptyText || 'Нет данных', w / 2, h / 2);
+      return;
+    }
+
+    var nums = values.map(function (p) { return p.v; });
+    var min = Math.min.apply(null, nums);
+    var max = Math.max.apply(null, nums);
+    if (min === max) { min = min - 1; max = max + 1; }
+    var pad = (max - min) * 0.1;
+    min -= pad; max += pad;
+    if (min < 0 && nums.every(function (v) { return v >= 0; })) min = 0;
+
+    function x(i) { return P.left + (values.length === 1 ? plotW / 2 : (i / (values.length - 1)) * plotW); }
+    function y(v) { return P.top + plotH - ((v - min) / (max - min)) * plotH; }
+
+    ctx.strokeStyle = colorGrid;
+    ctx.fillStyle = colorText;
+    ctx.font = '10px sans-serif';
+    ctx.lineWidth = 1;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+
+    var steps = 4;
+    for (var s = 0; s <= steps; s++) {
+      var val = min + ((max - min) * s) / steps;
+      var py = y(val);
+      ctx.beginPath();
+      ctx.moveTo(P.left, py);
+      ctx.lineTo(w - P.right, py);
+      ctx.stroke();
+      ctx.fillText(o.formatY ? o.formatY(val) : Math.round(val), P.left - 6, py);
+    }
+
+    var grad = ctx.createLinearGradient(0, P.top, 0, P.top + plotH);
+    grad.addColorStop(0, hexToRgba(colorLine, 0.25));
+    grad.addColorStop(1, hexToRgba(colorLine, 0.02));
+
+    ctx.beginPath();
+    ctx.moveTo(x(0), y(values[0].v));
+    for (var i = 1; i < values.length; i++) {
+      var px = x(i), pyv = y(values[i].v);
+      var ppx = x(i - 1), ppy = y(values[i - 1].v);
+      var cx = (ppx + px) / 2;
+      ctx.bezierCurveTo(cx, ppy, cx, pyv, px, pyv);
+    }
+    var linePath = ctx.strokeStyle;
+    ctx.save();
+    ctx.lineTo(x(values.length - 1), P.top + plotH);
+    ctx.lineTo(x(0), P.top + plotH);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.moveTo(x(0), y(values[0].v));
+    for (var j = 1; j < values.length; j++) {
+      var nx = x(j), ny = y(values[j].v);
+      var bx = (x(j - 1) + nx) / 2;
+      ctx.bezierCurveTo(bx, y(values[j - 1].v), bx, ny, nx, ny);
+    }
+    ctx.strokeStyle = colorLine;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    ctx.fillStyle = colorText;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(values[0].label || '', P.left, h - P.bottom + 5);
+    ctx.textAlign = 'right';
+    ctx.fillText(values[values.length - 1].label || '', w - P.right, h - P.bottom + 5);
+  }
+
+  function loadCharts() {
+    var hours = ($('charts-hours') || {}).value || 24;
+    return api('/api/metrics?kind=history&hours=' + hours).then(function (data) {
+      var points = data.points || [];
+      var hasData = points.some(function (p) { return p.sent || p.queued || p.restarts || p.ws; });
+
+      var empty = $('charts-empty');
+      if (empty) empty.style.display = hasData ? 'none' : '';
+
+      var status = $('charts-status');
+      if (status) status.textContent = 'за ' + (data.hours || hours) + ' ч';
+
+      var last = points.length ? points[points.length - 1] : {};
+      if ($('cv-sent')) $('cv-sent').textContent = last.sent || 0;
+      if ($('cv-queue')) $('cv-queue').textContent = last.queued || 0;
+      if ($('cv-ws')) $('cv-ws').textContent = (last.ws == null ? '—' : last.ws + '%');
+      if ($('cv-restarts')) $('cv-restarts').textContent = last.restarts || 0;
+
+      drawLine($('chart-sent'), points, { field: 'sent', color: cssVar('--aq-primary', '#1f4e8c') });
+      drawLine($('chart-queue'), points, { field: 'queued', color: cssVar('--warn', '#b26a00') });
+      drawLine($('chart-ws'), points, { field: 'ws', color: cssVar('--ok', '#2e7d32'), formatY: function (v) { return Math.round(v) + '%'; } });
+      drawLine($('chart-restarts'), points, { field: 'restarts', color: cssVar('--err', '#c62828') });
+    }).catch(function () { /* графики не критичны */ });
+  }
+
+  // ---------------------------------------------------------------- календарь
+
+  var AW_WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
+  var AW_MONTHS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+  var AW_PALETTE = ['#4c8dff', '#2fb37a', '#e8a33d', '#d9534f', '#8e6cd4',
+                    '#17a2b8', '#c2410c', '#65a30d', '#db2777', '#0891b2'];
+  var awDays = [];
+  var awOffset = 0;
+  var awMaxOffset = 0;
+  var awColors = {};
+  var awSeq = 0;
+
+  function awColor(name) {
+    if (!awColors[name]) {
+      awColors[name] = AW_PALETTE[awSeq % AW_PALETTE.length];
+      awSeq++;
+    }
+    return awColors[name];
+  }
+
+  function awYmd(d) {
+    return d.getFullYear() + '-' +
+      String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0');
+  }
+
+  function awMonday(dateStr) {
+    var d = new Date(dateStr + 'T00:00:00');
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return d;
+  }
+
+  function awWeek(shift) {
+    if (!awDays.length) return [];
+    var byDate = {};
+    awDays.forEach(function (d) { byDate[d.date] = d; });
+
+    var withData = awDays.filter(function (d) { return d.count > 0; });
+    if (!withData.length) return [];
+
+    var anchor = awMonday(withData[withData.length - 1].date);
+    anchor.setDate(anchor.getDate() - shift * 7);
+
+    var out = [];
+    for (var i = 0; i < 7; i++) {
+      var d = new Date(anchor);
+      d.setDate(anchor.getDate() + i);
+      var key = awYmd(d);
+      out.push(byDate[key] || { date: key, count: 0, by_channel: [] });
+    }
+    return out;
+  }
+
+  function awLabel(days) {
+    if (!days.length) return '';
+    var a = new Date(days[0].date + 'T00:00:00');
+    var b = new Date(days[6].date + 'T00:00:00');
+    if (a.getMonth() === b.getMonth()) {
+      return a.getDate() + '–' + b.getDate() + ' ' + AW_MONTHS[a.getMonth()];
+    }
+    return a.getDate() + ' ' + AW_MONTHS[a.getMonth()] + ' – ' + b.getDate() + ' ' + AW_MONTHS[b.getMonth()];
+  }
+
+  function awTipHtml(day) {
+    var dt = new Date(day.date + 'T00:00:00');
+    var wd = AW_WEEKDAYS[(dt.getDay() + 6) % 7];
+    var html = '<div class="aw-tip-head">' + escapeHtml(day.date) + ' · ' + wd + '<br>' +
+      '<strong>' + (day.count || 0) + '</strong> ' +
+      ((day.count === 1) ? 'уведомление' : 'уведомлений') + '</div>';
+
+    var list = day.by_channel || [];
+    if (list.length) {
+      html += '<div class="aw-tip-list">' + list.slice(0, 8).map(function (item) {
+        return '<div class="aw-tip-row">' +
+          '<i class="aw-tip-dot" style="background:' + awColor(item.name) + '"></i>' +
+          '<span class="aw-tip-uid">' + escapeHtml(item.name) + '</span>' +
+          '<span class="aw-tip-cnt">' + item.count + '</span></div>';
+      }).join('') + '</div>';
+    } else {
+      html += '<div class="aw-tip-empty">нет уведомлений</div>';
+    }
+    return html;
+  }
+
+  function renderCalendar() {
+    var root = $('activity-week');
+    if (!root) return;
+    var days = awWeek(awOffset);
+    if (!days.length) { root.innerHTML = ''; return; }
+
+    var max = Math.max.apply(null, days.map(function (d) { return d.count || 0; }).concat([0]));
+    var H = 30;
+
+    var cols = days.map(function (day) {
+      var dt = new Date(day.date + 'T00:00:00');
+      var wd = AW_WEEKDAYS[(dt.getDay() + 6) % 7];
+      var h = max ? Math.max(3, Math.round(((day.count || 0) / max) * H)) : 3;
+      var list = day.by_channel || [];
+
+      var bar;
+      if (list.length > 1) {
+        var segs = list.map(function (item) {
+          var seg = Math.max(1, Math.round((item.count / (day.count || 1)) * h));
+          return '<i class="aw-seg" style="height:' + seg + 'px;background:' + awColor(item.name) + '"></i>';
+        }).join('');
+        bar = '<span class="aw-stack" style="height:' + h + 'px">' + segs + '</span>';
+      } else {
+        var color = list.length ? awColor(list[0].name) : 'var(--border-light)';
+        bar = '<span class="aw-stack" style="height:' + h + 'px">' +
+              '<i class="aw-seg" style="height:' + h + 'px;background:' + color + '"></i></span>';
+      }
+
+      return '<span class="aw-col" data-tip="' + escapeHtml(awTipHtml(day)) + '">' +
+             bar + '<em class="aw-lbl">' + wd + '</em></span>';
+    }).join('');
+
+    root.innerHTML =
+      '<div class="aw-chart">' + cols + '</div>' +
+      '<div class="aw-nav">' +
+        '<button type="button" class="am-btn" data-nav="-1"' +
+          (awOffset < awMaxOffset ? '' : ' disabled') + ' title="предыдущая неделя">‹</button>' +
+        '<span class="aw-period">' + escapeHtml(awLabel(days)) + '</span>' +
+        '<button type="button" class="am-btn" data-nav="1"' +
+          (awOffset > 0 ? '' : ' disabled') + ' title="следующая неделя">›</button>' +
+      '</div>';
+
+    root.querySelectorAll('.am-btn').forEach(function (b) {
+      b.addEventListener('click', function () {
+        if (b.disabled) return;
+        awOffset += parseInt(b.getAttribute('data-nav'), 10);
+        awOffset = Math.max(0, Math.min(awOffset, awMaxOffset));
+        renderCalendar();
+      });
+    });
+  }
+
+  function loadCalendar() {
+    return api('/api/metrics?kind=days&limit=365').then(function (data) {
+      awDays = data.days || [];
+      var withData = awDays.filter(function (d) { return d.count > 0; });
+      if (withData.length) {
+        var first = awMonday(withData[0].date);
+        var last = awMonday(withData[withData.length - 1].date);
+        awMaxOffset = Math.max(0, Math.round((last - first) / (7 * 86400000)));
+      } else {
+        awMaxOffset = 0;
+      }
+      if (awOffset > awMaxOffset) awOffset = awMaxOffset;
+      renderCalendar();
+    }).catch(function () {});
+  }
+
+  var awTip = null;
+
+  function awShowTip(el) {
+    var html = el.getAttribute('data-tip');
+    if (!html) return;
+    if (!awTip) {
+      awTip = document.createElement('div');
+      awTip.className = 'aw-tip';
+      document.body.appendChild(awTip);
+    }
+    awTip.innerHTML = html;
+    awTip.style.display = 'block';
+
+    var r = el.getBoundingClientRect();
+    var tw = awTip.offsetWidth, th = awTip.offsetHeight;
+    var left = Math.max(8, Math.min(r.left + r.width / 2 - tw / 2, window.innerWidth - tw - 8));
+    var top = r.top - th - 8;
+    if (top < 8) top = r.bottom + 8;
+    awTip.style.left = left + 'px';
+    awTip.style.top = top + 'px';
+  }
+
+  function awHideTip() {
+    if (awTip) awTip.style.display = 'none';
+  }
+
+  // ---------------------------------------------------------------- диагностика
+
+  function fmtTimestamp(ms) {
+    if (!ms) return '—';
+    try {
+      return new Date(Number(ms)).toLocaleString('ru-RU', {
+        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+      });
+    } catch (e) { return '—'; }
+  }
+
+  function loadDiagnostics() {
+    return Promise.all([
+      api('/api/diagnostics?part=identity').catch(function (e) { return { data: { error: e.message } }; }),
+      api('/api/diagnostics?part=limits').catch(function (e) { return { data: { error: e.message } }; }),
+      api('/api/diagnostics?part=channels').catch(function (e) { return { data: { error: e.message, items: [] } }; }),
+      api('/api/diagnostics?part=chats').catch(function (e) { return { data: { error: e.message, chats: [] } }; }),
+    ]).then(function (results) {
+      renderDiagIdentity(results[0].data);
+      renderDiagLimits(results[1].data);
+      renderDiagChannels(results[2].data);
+      renderDiagChats(results[3].data);
+    });
+  }
+
+  function renderDiagIdentity(data) {
+    if (!data || !data.available) {
+      rows($('diag-identity'), [['Состояние', '<span class="err">' + escapeHtml((data && data.error) || 'бот не запущен') + '</span>']]);
+      return;
+    }
+    var health = data.health || {};
+    rows($('diag-identity'), [
+      ['ID бота', '<code>' + escapeHtml(data.me_id || '—') + '</code>'],
+      ['Сервер', escapeHtml(data.server_name || '—')],
+      ['Версия сервера', escapeHtml(data.server_version || '—')],
+      ['Состояние', health.status === 'authorized'
+        ? '<span class="ok">авторизован</span>'
+        : '<span class="warn">' + escapeHtml(health.status || '—') + '</span>'],
+      ['WebSocket', health.websocket_connected ? '<span class="ok">подключён</span>' : '<span class="err">нет</span>'],
+      ['Порт', escapeHtml(String(health.port || '—'))],
+    ]);
+  }
+
+  function renderDiagLimits(data) {
+    if (!data || !data.available) {
+      rows($('diag-limits'), [['Состояние', '<span class="dim">' + escapeHtml((data && data.error) || 'недоступно') + '</span>']]);
+      return;
+    }
+    var ext = (data.extensions || []).join(', ') || '—';
+    rows($('diag-limits'), [
+      ['Макс. размер файла', data.max_size_mb ? data.max_size_mb + ' МБ' : '—'],
+      ['Режим расширений', escapeHtml(data.extensions_mode || '—')],
+      ['Расширения', '<code>' + escapeHtml(ext) + '</code>'],
+    ]);
+  }
+
+  function renderDiagChannels(data) {
+    var body = $('diag-channels');
+    if (!body) return;
+    var items = (data && data.items) || [];
+    var problems = (data && data.problems) || 0;
+
+    var badge = $('diag-ch-problems');
+    if (badge) {
+      badge.textContent = problems;
+      badge.className = 'badge badge-count' + (problems ? ' badge-warn' : '');
+    }
+
+    if (!items.length) {
+      body.innerHTML = '<tr><td colspan="6"><div class="empty-cell">' +
+        (data && data.error ? escapeHtml(data.error) : 'каналов нет') + '</div></td></tr>';
+      return;
+    }
+
+    body.innerHTML = items.map(function (item) {
+      var broken = !item.ok;
+      var style = broken ? ' style="background:var(--err-bg)"' : '';
+      var botCell = item.bot_is_member === true
+        ? '<span class="ok">участник</span>' + (item.bot_role ? ' <span class="dim fs-11">(' + escapeHtml(item.bot_role) + ')</span>' : '')
+        : (item.bot_is_member === false ? '<span class="err">нет</span>' : '<span class="dim">—</span>');
+      return '<tr' + style + '>' +
+        '<td><strong>' + escapeHtml(item.name) + '</strong></td>' +
+        '<td>' + (item.title
+          ? escapeHtml(item.title)
+          : '<span class="dim mono">' + escapeHtml(String(item.chat_id).slice(0, 16)) + '…</span>') + '</td>' +
+        '<td class="fs-12">' + escapeHtml(item.chat_type || '—') + '</td>' +
+        '<td class="fs-12">' + (item.participants || 0) + '</td>' +
+        '<td class="fs-12">' + botCell + '</td>' +
+        '<td class="fs-12 ' + (broken ? 'err' : 'dim') + '">' + escapeHtml(item.reason || '') + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function renderDiagChats(data) {
+    var body = $('diag-chats');
+    if (!body) return;
+    var chats = (data && data.chats) || [];
+    var count = $('diag-chats-count');
+    if (count) count.textContent = chats.length;
+
+    body.innerHTML = chats.length ? chats.map(function (chat) {
+      return '<tr>' +
+        '<td>' + escapeHtml(chat.title || '<без названия>') + '</td>' +
+        '<td class="mono dim fs-12">' + escapeHtml(String(chat.chat_id).slice(0, 20)) + '…</td>' +
+        '<td class="fs-12">' + escapeHtml(chat.chat_type || '—') + '</td>' +
+        '<td class="fs-12">' + (chat.unread || 0) + '</td>' +
+        '</tr>';
+    }).join('') : '<tr><td colspan="4"><div class="empty-cell">' +
+        (data && data.error ? escapeHtml(data.error) : 'чатов нет') + '</div></td></tr>';
+  }
+
   function initOutboxHandlers() {
     on('outbox-flush', 'click', function () {
       api('/api/outbox?action=flush', { method: 'POST' })
@@ -711,6 +1161,13 @@ APP_JS = r"""
     });
   }
 
+  function initDiagnosticsHandlers() {
+    on('diag-refresh', 'click', function () {
+      loadDiagnostics().then(function () { toast('Данные обновлены'); })
+        .catch(function (e) { toast(e.message, true); });
+    });
+  }
+
   function initLogHandlers() {
     on('log-reload', 'click', loadLogs);
     on('log-file', 'change', loadLogs);
@@ -736,7 +1193,8 @@ APP_JS = r"""
     if (page === 'settings') return { settings: true };
     if (page === 'admins') return { admins: true };
     if (page === 'local-admin') return { localAdmin: true };
-    return { status: true, logs: true };
+    if (page === 'diagnostics') return { diagnostics: true };
+    return { status: true, logs: true, charts: true, calendar: true };
   }
 
   document.addEventListener('DOMContentLoaded', function () {
@@ -753,10 +1211,35 @@ APP_JS = r"""
       loadStatus();
     });
 
+    document.addEventListener('mouseover', function (e) {
+      var el = e.target.closest && e.target.closest('.aw-col[data-tip]');
+      if (el) awShowTip(el);
+    });
+    document.addEventListener('mouseout', function (e) {
+      var el = e.target.closest && e.target.closest('.aw-col[data-tip]');
+      if (el) awHideTip();
+    });
+    window.addEventListener('scroll', awHideTip, true);
+
+    var resizeTimer = null;
+    window.addEventListener('resize', function () {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(function () { loadCharts(); }, 250);
+    });
+
     loadMe().then(function () {
       if (tasks.status) {
         loadStatus();
         setInterval(loadStatus, 5000);
+      }
+      if (tasks.charts) {
+        on('charts-hours', 'change', loadCharts);
+        loadCharts();
+        setInterval(loadCharts, 60000);
+      }
+      if (tasks.calendar) {
+        loadCalendar();
+        setInterval(loadCalendar, 300000);
       }
       if (tasks.logs) {
         loadLogs();
@@ -779,6 +1262,10 @@ APP_JS = r"""
       if (tasks.admins) {
         initAdminHandlers();
         loadAdmins().catch(function () {});
+      }
+      if (tasks.diagnostics) {
+        initDiagnosticsHandlers();
+        loadDiagnostics();
       }
       if (tasks.localAdmin) {
         initLocalAdminHandlers();

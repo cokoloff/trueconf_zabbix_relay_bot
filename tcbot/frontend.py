@@ -81,6 +81,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
           <a class="ua-item" href="/settings"><span class="ua-ico">⚙️</span>Параметры</a>
           <a class="ua-item" href="/admins"><span class="ua-ico">👑</span>Администраторы</a>
           <a class="ua-item" href="/local-admin"><span class="ua-ico">🔑</span>Локальный вход</a>
+          <a class="ua-item" href="/diagnostics"><span class="ua-ico">🔬</span>Диагностика</a>
         </div>
 
         <div class="ua-group ua-group-static"><span class="ua-group-name">Служебные</span></div>
@@ -148,6 +149,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="activity-week" id="activity-week"></div>
+
   <div class="sh-actions">
     <span class="dim fs-11" id="dashboard-status-text"></span>
     <span class="dash-spinner" id="dashboard-spinner"></span>
@@ -166,6 +169,44 @@ INDEX_HTML = r"""<!DOCTYPE html>
       </div>
     </div>
   </details>
+</section>
+
+<!-- ==================== Графики ==================== -->
+<section class="card" id="card-charts">
+  <h2>
+    <span>Динамика</span>
+    <span class="h2-right">
+      <select id="charts-hours" style="padding:3px 8px; font-size:12px; width:auto;">
+        <option value="6">6 часов</option>
+        <option value="24" selected>сутки</option>
+        <option value="72">3 суток</option>
+        <option value="168">неделя</option>
+      </select>
+      <span id="charts-status" class="dim fs-11"></span>
+    </span>
+  </h2>
+
+  <div class="charts-grid">
+    <div class="chart-box">
+      <div class="chart-title"><span>Отправлено</span><span class="chart-value" id="cv-sent">—</span></div>
+      <canvas id="chart-sent"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title"><span>Очередь</span><span class="chart-value" id="cv-queue">—</span></div>
+      <canvas id="chart-queue"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title"><span>Связь</span><span class="chart-value" id="cv-ws">—</span></div>
+      <canvas id="chart-ws"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title"><span>Перезапуски</span><span class="chart-value" id="cv-restarts">—</span></div>
+      <canvas id="chart-restarts"></canvas>
+    </div>
+  </div>
+  <div id="charts-empty" class="dim fs-12" style="display:none; padding:8px 0;">
+    История ещё не накоплена: точки появляются по мере работы бота.
+  </div>
 </section>
 
 <!-- ==================== Логи ==================== -->

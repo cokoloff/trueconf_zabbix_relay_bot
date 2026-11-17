@@ -549,6 +549,169 @@ code {
 .pager button { padding: 5px 12px; font-size: 12.5px; }
 .pager button:disabled { opacity: .4; }
 
+/* ---------------- Графики «Динамика» ---------------- */
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+}
+@media (min-width: 1200px) {
+  .charts-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 700px) {
+  .charts-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.chart-box {
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 8px 10px 10px;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-tile);
+}
+.chart-title {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.chart-title .chart-value { color: var(--aq-primary); font-weight: 600; }
+.chart-box canvas {
+  display: block;
+  width: 100% !important;
+  height: 110px !important;
+}
+
+/* ---------------- Календарь недели ---------------- */
+.activity-week {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.aw-chart {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 40px;
+}
+.aw-col {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  gap: 2px;
+  width: 10px;
+  cursor: pointer;
+}
+.aw-lbl {
+  font-size: 9px;
+  font-style: normal;
+  color: var(--text-muted);
+  line-height: 1;
+}
+.aw-stack {
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-start;
+  width: 10px;
+  min-height: 3px;
+  border-radius: 2px 2px 0 0;
+  overflow: hidden;
+}
+.aw-seg { display: block; width: 100%; min-height: 1px; }
+.aw-nav { display: inline-flex; align-items: center; gap: 6px; }
+.aw-period {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 84px;
+  text-align: center;
+}
+.am-btn {
+  border: 1px solid var(--border-light);
+  background: transparent; color: var(--text-muted);
+  border-radius: 3px; width: 18px; height: 18px;
+  cursor: pointer; font-size: 12px; line-height: 1;
+  padding: 0; flex: 0 0 auto;
+}
+.am-btn:hover:not(:disabled) { border-color: var(--aq-primary); color: var(--aq-primary); }
+.am-btn:disabled { opacity: .3; cursor: default; }
+
+/* Подсказка календаря */
+.aw-tip {
+  position: fixed;
+  z-index: 1000;
+  min-width: 150px;
+  max-width: 280px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  border: 1px solid var(--border-light);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .28);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+}
+.aw-tip-head {
+  color: var(--text-muted);
+  font-size: 11px;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border-light);
+}
+.aw-tip-head strong { color: var(--text-main); font-size: 13px; }
+.aw-tip-list { display: flex; flex-direction: column; gap: 3px; }
+.aw-tip-row { display: flex; align-items: center; gap: 6px; }
+.aw-tip-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.aw-tip-uid {
+  flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text-main);
+}
+.aw-tip-cnt { font-weight: 600; color: var(--text-muted); flex: 0 0 auto; }
+.aw-tip-empty { color: var(--text-muted); font-size: 11px; }
+
+/* Заголовок раздела с календарём справа */
+.section-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: nowrap;
+  margin-bottom: 8px;
+}
+.section-head-text { flex: 1 1 auto; min-width: 0; }
+.section-head .activity-week {
+  flex: 0 0 auto;
+  margin-left: auto;
+  align-self: flex-start;
+  padding-top: 2px;
+}
+@media (max-width: 760px) {
+  .section-head { flex-wrap: wrap; gap: 10px; }
+  .section-head .activity-week { margin-left: 0; }
+}
+
+/* ---------------- Диагностика ---------------- */
+.diag-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px; align-items: start;
+}
+@media (max-width: 900px) { .diag-grid { grid-template-columns: 1fr; } }
+.diag-h {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--text-muted); margin: 0 0 8px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+}
+.badge-warn { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
+
 /* ---------------- Заголовок страницы раздела ---------------- */
 .page-head { margin-bottom: 18px; }
 .back-link {

@@ -40,8 +40,10 @@ from tcbot.auth import AuthManager
 from tcbot.localadmin import LocalAdminStore
 from tcbot.logging_setup import get_channel_logger, setup_logging
 from tcbot.markup import MessageBuilder, plain_text, safe_text
+from tcbot.metrics import MetricsStore
 from tcbot.outbox import Outbox
 from tcbot.runner import BotRunner
+from tcbot.sdkinfo import SdkInspector
 from tcbot.sso import KeycloakSSO
 from tcbot.state import AdminManager, StateManager, TokenManager
 from tcbot.appjs import APP_JS
@@ -92,6 +94,12 @@ SDK_TIMEOUT = float(cfg("SDK_TIMEOUT", 15))
 VERIFY_SSL = bool(cfg("VERIFY_SSL", True))
 RECEIVE_UNREAD = bool(cfg("RECEIVE_UNREAD_MESSAGES", False))
 
+# История метрик для графиков и календаря активности в панели
+METRICS_ENABLED = bool(cfg("METRICS_ENABLED", True))
+METRICS_FILE = cfg("METRICS_FILE", "bot_metrics.json")
+METRICS_INTERVAL = int(cfg("METRICS_INTERVAL", 60))
+METRICS_SAVE_INTERVAL = int(cfg("METRICS_SAVE_INTERVAL", 300))
+
 # Очередь недоставленных уведомлений (переживает недоступность сервера и перезапуск)
 OUTBOX_ENABLED = bool(cfg("OUTBOX_ENABLED", True))
 OUTBOX_FILE = cfg("OUTBOX_FILE", "bot_outbox.json")
@@ -138,6 +146,9 @@ SSO_CONFIG = {
 }
 
 auth_manager: Optional[AuthManager] = None
+sdk_inspector: Optional[SdkInspector] = None
+metrics: Optional[MetricsStore] = None
+_metrics_task: Optional[asyncio.Task] = None
 
 # ============================================================================
 # ЛОГИРОВАНИЕ
@@ -1066,6 +1077,8 @@ async def handle_webhook(request: web.Request) -> web.Response:
             )
 
         await state_manager.increment("webhooks_received")
+        if metrics is not None:
+            metrics.record_channel_event(channel)
         webhook_log.info(f"   ✅ Уведомление отправлено за {elapsed:.3f}с")
 
         await _track_incident(alert, target_chat_id, channel)
@@ -1392,6 +1405,107 @@ async def api_local_admin(request: web.Request) -> web.Response:
     return web.json_response({"error": "method not allowed"}, status=405)
 
 
+async def api_diagnostics(request: web.Request) -> web.Response:
+    """
+    Данные из SDK для диагностики.
+
+        GET /api/diagnostics?part=identity|chats|channels|limits|history
+    """
+    if sdk_inspector is None:
+        return web.json_response({"error": "бот не запущен"}, status=503)
+
+    part = request.query.get("part", "identity")
+
+    if part == "identity":
+        data = await sdk_inspector.identity()
+    elif part == "chats":
+        data = await sdk_inspector.chats(
+            count=int(request.query.get("count", 50)),
+            page=int(request.query.get("page", 1)),
+        )
+    elif part == "channels":
+        data = await sdk_inspector.channel_health(
+            state_manager.notification_channels,
+            inspect_limit=int(request.query.get("limit", 12)),
+        )
+    elif part == "limits":
+        data = await sdk_inspector.limits()
+    elif part == "history":
+        chat_id = request.query.get("chat_id") or state_manager.default_chat
+        data = await sdk_inspector.history(chat_id, count=int(request.query.get("count", 5)))
+    else:
+        return web.json_response({"error": f"неизвестный раздел: {part}"}, status=400)
+
+    return web.json_response({"part": part, "data": data})
+
+
+async def metrics_collector(interval: float = 60.0, save_interval: float = 300.0) -> None:
+    """
+    Раз в interval секунд снимает состояние бота в историю метрик.
+
+    На работу бота не влияет: только чтение счётчиков и запись в отдельный файл.
+    """
+    last_save = 0.0
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            if metrics is None:
+                continue
+
+            health = runner.health() if runner else {}
+            metadata = state_manager.metadata if state_manager else {}
+
+            metrics.record_snapshot({
+                "sent": metadata.get("messages_sent", 0),
+                "queued": len(outbox) if outbox is not None else 0,
+                "connected": bool(health.get("ws_connected")),
+                "restarts": health.get("restarts", 0),
+            })
+
+            now = time.monotonic()
+            if now - last_save >= save_interval:
+                metrics.save()
+                last_save = now
+        except asyncio.CancelledError:
+            if metrics is not None:
+                metrics.save()
+            break
+        except Exception as exc:
+            error_log.error(f"❌ Ошибка сбора метрик: {exc}", exc_info=exc)
+
+
+async def api_metrics(request: web.Request) -> web.Response:
+    """
+    История метрик для графиков.
+
+        GET /api/metrics?kind=history&hours=24
+        GET /api/metrics?kind=days&limit=365
+        GET /api/metrics?kind=summary
+    """
+    if metrics is None:
+        return web.json_response({"error": "метрики не инициализированы"}, status=503)
+
+    kind = request.query.get("kind", "history")
+    if kind == "history":
+        try:
+            hours = int(request.query.get("hours", 24))
+        except ValueError:
+            hours = 24
+        return web.json_response(metrics.history(hours))
+
+    if kind == "days":
+        try:
+            limit = int(request.query.get("limit", 365))
+        except ValueError:
+            limit = 365
+        return web.json_response(metrics.days(limit))
+
+    if kind == "summary":
+        return web.json_response(metrics.summary())
+
+    return web.json_response({"error": f"неизвестный вид: {kind}"}, status=400)
+
+
 async def api_logs(request: web.Request) -> web.Response:
     name = request.query.get("file", "bot.log")
     if name not in ALLOWED_LOG_FILES:
@@ -1581,6 +1695,8 @@ async def build_web_app() -> web.Application:
     app.router.add_route("*", "/api/outbox", api_outbox)
     app.router.add_get("/api/logs", api_logs)
     app.router.add_route("*", "/api/local-admin", api_local_admin)
+    app.router.add_get("/api/diagnostics", api_diagnostics)
+    app.router.add_get("/api/metrics", api_metrics)
     return app
 
 
@@ -1623,6 +1739,8 @@ async def init_runtime_for_tests() -> None:
         dedup_window=OUTBOX_DEDUP_WINDOW,
         enabled=OUTBOX_ENABLED,
     )
+    global metrics
+    metrics = MetricsStore(file_path=METRICS_FILE, enabled=METRICS_ENABLED)
     admin_manager = AdminManager(
         admin_ids=[item.strip() for item in str(cfg("ADMIN_IDS", "")).split(",") if item.strip()],
         mode=cfg("ADMIN_MODE", "strict"),
@@ -1637,6 +1755,9 @@ async def init_runtime_for_tests() -> None:
         enabled=LOCAL_ADMIN_ENABLED,
         initial_password_file=LOCAL_ADMIN_PASSWORD_FILE,
     )
+    global sdk_inspector
+    sdk_inspector = SdkInspector(lambda: bot)
+
     # В тестах режим задаётся явно, независимо от .env
     auth_manager = AuthManager(
         mode="none",
@@ -1717,7 +1838,18 @@ def _publish_bot(instance: Bot) -> None:
 async def shutdown(reason: str = "manual") -> None:
     logger.info(f"🛑 Остановка бота ({reason})…")
 
-    global web_runner, _flush_task
+    global web_runner, _flush_task, _metrics_task
+    if _metrics_task is not None and not _metrics_task.done():
+        _metrics_task.cancel()
+        try:
+            await _metrics_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _metrics_task = None
+
+    if metrics is not None:
+        metrics.save()
+
     if _flush_task is not None and not _flush_task.done():
         _flush_task.cancel()
         try:
@@ -1750,9 +1882,11 @@ async def shutdown(reason: str = "manual") -> None:
 
 async def main() -> None:
     global bot, state_manager, admin_manager, token_manager, runner, start_time, web_runner
-    global outbox, _flush_task
+    global outbox, _flush_task, metrics, _metrics_task
 
     start_time = datetime.now()
+
+    metrics = MetricsStore(file_path=METRICS_FILE, enabled=METRICS_ENABLED)
 
     token_manager = TokenManager(TOKEN_CONFIG)
     state_manager = StateManager(cfg("STATE_FILE", "bot_state.json"), version=VERSION)
@@ -1806,6 +1940,9 @@ async def main() -> None:
         session_ttl_seconds=SSO_CONFIG["session_ttl"],
         session_secret=SSO_CONFIG["session_secret"],
     )
+
+    global sdk_inspector
+    sdk_inspector = SdkInspector(lambda: bot)
 
     logger.info("=" * 64)
     logger.info(f"🚀 TrueConf Zabbix Relay Bot v{VERSION}")
@@ -1884,6 +2021,11 @@ async def main() -> None:
     _flush_task = asyncio.create_task(
         outbox_flusher(OUTBOX_FLUSH_INTERVAL), name="outbox-flusher"
     )
+    if metrics is not None and metrics.enabled:
+        _metrics_task = asyncio.create_task(
+            metrics_collector(METRICS_INTERVAL, METRICS_SAVE_INTERVAL),
+            name="metrics-collector",
+        )
     try:
         ready = await runner.wait_ready(timeout=60)
         if ready:

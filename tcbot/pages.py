@@ -206,6 +206,71 @@ LOCAL_ADMIN_CARD = r"""<div class="card">
     <div class="actions"><button type="button" id="la-save">Сменить пароль</button></div>
   </div>"""
 
+DIAGNOSTICS_CARD = r"""<div class="card" id="card-diag">
+  <h2>
+    <span>Диагностика через SDK</span>
+    <span class="h2-right">
+      <button type="button" class="secondary small" id="diag-refresh">Обновить</button>
+    </span>
+  </h2>
+  <p class="dim fs-12" style="margin:0 0 14px;">
+    Данные, которые бот получает от сервера TrueConf: сведения о боте, чаты,
+    состояние каналов, ограничения на файлы.
+  </p>
+
+  <div class="diag-grid">
+    <div>
+      <h3 class="diag-h">Бот и сервер</h3>
+      <div id="diag-identity"></div>
+    </div>
+    <div>
+      <h3 class="diag-h">Ограничения сервера</h3>
+      <div id="diag-limits"></div>
+    </div>
+  </div>
+
+  <h3 class="diag-h" style="margin-top:18px;">
+    Состояние каналов
+    <span class="badge badge-count" id="diag-ch-problems">0</span>
+  </h3>
+  <p class="dim fs-12" style="margin:0 0 10px;">
+    Проверяется, что чат канала существует, сколько в нём участников и состоит
+    ли там бот. Каналы с ошибкой выделены красным.
+  </p>
+  <div class="table-scroll" style="max-height:340px;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:24%;">Канал</th>
+          <th style="width:26%;">Чат</th>
+          <th style="width:13%;">Тип</th>
+          <th style="width:11%;">Участников</th>
+          <th style="width:12%;">Бот</th>
+          <th>Примечание</th>
+        </tr>
+      </thead>
+      <tbody id="diag-channels"></tbody>
+    </table>
+  </div>
+
+  <h3 class="diag-h" style="margin-top:18px;">
+    Чаты бота <span class="badge badge-count" id="diag-chats-count">0</span>
+  </h3>
+  <div class="table-scroll" style="max-height:280px;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:40%;">Название</th>
+          <th style="width:30%;">chat_id</th>
+          <th style="width:16%;">Тип</th>
+          <th style="width:14%;">Непрочитанных</th>
+        </tr>
+      </thead>
+      <tbody id="diag-chats"></tbody>
+    </table>
+  </div>
+</div>"""
+
 # ============================================================================
 # ОПИСАНИЕ СТРАНИЦ
 # ============================================================================
@@ -245,6 +310,13 @@ PAGES: Dict[str, Dict[str, Any]] = {
         "description": "Кто может управлять ботом командами в чате. Записи из config.py удалить нельзя.",
         "content": ADMINS_CARD,
         "scripts": ["admins"],
+    },
+    "diagnostics": {
+        "title": "Диагностика",
+        "icon": "🔬",
+        "description": "Данные от сервера TrueConf: сведения о боте, состояние каналов, чаты и ограничения.",
+        "content": DIAGNOSTICS_CARD,
+        "scripts": ["diagnostics"],
     },
     "local-admin": {
         "title": "Локальный администратор",
@@ -322,6 +394,7 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
           <a class="ua-item" href="/settings"><span class="ua-ico">⚙️</span>Параметры</a>
           <a class="ua-item" href="/admins"><span class="ua-ico">👑</span>Администраторы</a>
           <a class="ua-item" href="/local-admin"><span class="ua-ico">🔑</span>Локальный вход</a>
+          <a class="ua-item" href="/diagnostics"><span class="ua-ico">🔬</span>Диагностика</a>
         </div>
 
         <div class="ua-section ua-foot">

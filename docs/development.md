@@ -25,6 +25,8 @@ python scripts/test_channels.py        # каналы: state, API, команд�
 python scripts/test_localadmin.py      # локальный администратор
 python scripts/test_sso.py             # авторизация панели
 python scripts/test_outbox.py          # очередь недоставленных
+python scripts/test_diagnostics.py     # данные из SDK для панели
+python scripts/test_metrics.py         # история метрик и календарь
 python scripts/test_smoke.py           # сквозная проверка приложения
 ```
 
@@ -41,6 +43,8 @@ python scripts/test_smoke.py           # сквозная проверка пр�
 | `test_localadmin.py` | 35 | хэширование, блокировки, смена пароля, автогенерация |
 | `test_sso.py` | 22 | 401/403, CSRF, подпись cookie, истечение сессии |
 | `test_outbox.py` | 20 | накопление, выгрузка, дедупликация, переполнение |
+| `test_diagnostics.py` | 32 | типы чатов, роли, проверка каналов, лимиты, API |
+| `test_metrics.py` | 28 | снимки состояния, проценты связи, календарь, API |
 | `test_smoke.py` | 40 | вебхуки, API панели, команды, пересоздание бота |
 
 ## Правила разработки

@@ -61,7 +61,7 @@ STATE_FILE = os.getenv("STATE_FILE", "bot_state.json")
 ADMIN_MODE = os.getenv("ADMIN_MODE", "strict")
 
 # Список администраторов (через запятую). Эти записи нельзя удалить из бота.
-ADMIN_IDS = os.getenv("ADMIN_IDS", "admin@example.com,admin2@example.com")
+ADMIN_IDS = os.getenv("ADMIN_IDS", "admin@example.com")
 
 # ============================================================================
 # ВЕБ-СЕРВЕР И ПАНЕЛЬ УПРАВЛЕНИЯ
@@ -213,6 +213,21 @@ OUTBOX_FLUSH_INTERVAL = float(os.getenv("OUTBOX_FLUSH_INTERVAL", "5"))
 
 # Схлопывать несколько обновлений по одному триггеру в одно (останется последнее)
 OUTBOX_COLLAPSE = os.getenv("OUTBOX_COLLAPSE", "true").lower() in ("1", "true", "yes", "on")
+
+# ============================================================================
+# ИСТОРИЯ МЕТРИК ДЛЯ ГРАФИКОВ И КАЛЕНДАРЯ
+# ============================================================================
+# Бот раз в METRICS_INTERVAL секунд снимает состояние: отправленные сообщения,
+# размер очереди, связь, перезапуски. Из этих точек строятся графики,
+# из дневной сводки — календарь активности в панели.
+METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+METRICS_FILE = os.getenv("METRICS_FILE", "bot_metrics.json")
+
+# Период снятия точки (сек)
+METRICS_INTERVAL = int(os.getenv("METRICS_INTERVAL", "60"))
+
+# Период сохранения истории на диск (сек)
+METRICS_SAVE_INTERVAL = int(os.getenv("METRICS_SAVE_INTERVAL", "300"))
 
 # ============================================================================
 # ДОСТАВКА УВЕДОМЛЕНИЙ
