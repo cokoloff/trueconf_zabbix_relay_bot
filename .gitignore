@@ -12,8 +12,18 @@ bot_outbox.json
 bot_outbox.tmp
 bot_metrics.json
 bot_metrics.tmp
+bot_delivered.json
+bot_delivered.tmp
 local-admin-initial-password.txt
 backups/
+
+# Артефакты тестов: состояния, очереди, метрики, реестры
+*_test.json
+*_outbox.json
+dl_test.json
+metrics_*.json
+bot_*_test.json
+local-admin-test-pw.txt
 
 # ---------------------------------------------------------------------------
 # Логи

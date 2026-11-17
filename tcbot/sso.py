@@ -177,7 +177,7 @@ class KeycloakSSO:
         cookie_name: str = "tcbot_session",
         cookie_secure: bool = False,
         verify_ssl: Any = True,
-        scope: str = "openid profile email",
+        scope: str = "openid profile email roles",
         session_secret: str = "",
     ):
         self.server_url = server_url.rstrip("/")
@@ -189,6 +189,8 @@ class KeycloakSSO:
         self.viewer_roles = {role.lower() for role in (viewer_roles or [])}
         self.local_admins = {item.lower() for item in (local_admins or []) if item}
         self.scope = scope
+        # scope, которые клиент не принимает — определяем при первом входе
+        self._rejected_scopes: set = set()
         self.verify_ssl = verify_ssl
         self.cookie_secure = cookie_secure
 
@@ -325,9 +327,101 @@ class KeycloakSSO:
 
     # ------------------------------ сценарий входа ------------------------------ #
 
+    async def resolve_scope(self) -> str:
+        """
+        Подбирает scope, который клиент действительно может запросить.
+
+        Тонкость: discovery перечисляет ВСЕ scope realm, включая те, что не
+        назначены нашему клиенту. Запрос такого scope даёт 'invalid_scope' и
+        вход не работает вовсе. Поэтому проблемные scope определяем опытным
+        путём: проверяем authorize-запрос и запоминаем результат.
+        """
+        requested = [item for item in str(self.scope or "").split() if item]
+        if not requested:
+            requested = ["openid"]
+        if "openid" not in [item.lower() for item in requested]:
+            requested.insert(0, "openid")
+
+        rejected = self._rejected_scopes
+        good = [item for item in requested if item.lower() not in rejected]
+
+        # Проверяем набор целиком. Если Keycloak его не принимает —
+        # отбрасываем по одному, пока не останется рабочий вариант.
+        # Так лечится и первый вход (когда список отброшенных пуст),
+        # и случай, когда настройки клиента изменили позже.
+        if not await self._scope_accepted(" ".join(good)):
+            for candidate in [i for i in good if i.lower() != "openid"]:
+                trials = [i for i in good if i != candidate]
+                if await self._scope_accepted(" ".join(trials)):
+                    rejected.add(candidate.lower())
+                    good = trials
+                    logger.warning(
+                        f"🔐 scope '{candidate}' недоступен клиенту — "
+                        f"вход выполняется без него"
+                    )
+
+        if not good:
+            good = ["openid"]
+        return " ".join(good)
+
+    async def _scope_accepted(self, scope_value: str) -> bool:
+        """Проверяет, принимает ли Keycloak такой набор scope."""
+        try:
+            conf = await self.discovery()
+        except Exception:
+            return True
+        endpoint = conf.get("authorization_endpoint")
+        if not endpoint:
+            return True
+
+        params = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "scope": scope_value,
+            "state": "scope-probe",
+        }
+        url = f"{endpoint}?{urlencode(params)}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    allow_redirects=False,
+                    ssl=self._ssl_arg(),
+                ) as resp:
+                    # При неверном scope Keycloak не показывает страницу
+                    # входа, а сразу редиректит на redirect_uri с
+                    # error=invalid_scope. Успех — это 200 (страница логина).
+                    if resp.status == 200:
+                        return True
+
+                    location = resp.headers.get("Location", "")
+                    if "invalid_scope" in location.lower():
+                        logger.warning(
+                            f"🔐 Keycloak отклонил scope '{scope_value}' "
+                            f"(invalid_scope) — исключаю проблемные"
+                        )
+                        return False
+
+                    body = await resp.text()
+                    return "invalid_scope" not in body.lower()
+        except Exception:
+            # Не смогли проверить — не ломаем вход из-за этого
+            return True
+
+    def _ssl_arg(self):
+        """Параметр ssl для aiohttp с учётом VERIFY_SSL."""
+        if self.verify_ssl is True:
+            return None
+        if self.verify_ssl is False:
+            return False
+        return self.verify_ssl
+
     async def build_login_url(self, redirect_uri: str, next_url: str = "/") -> Tuple[str, Dict[str, str]]:
         """Готовит URL авторизации и данные для cookie-состояния."""
         conf = await self.discovery()
+        scope = await self.resolve_scope()
         state = secrets.token_urlsafe(24)
         nonce = secrets.token_urlsafe(24)
         verifier = secrets.token_urlsafe(64)
@@ -337,7 +431,7 @@ class KeycloakSSO:
             "response_type": "code",
             "client_id": self.client_id,
             "redirect_uri": redirect_uri,
-            "scope": self.scope,
+            "scope": scope,
             "state": state,
             "nonce": nonce,
             "code_challenge": challenge,

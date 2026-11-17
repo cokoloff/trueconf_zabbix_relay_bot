@@ -12,13 +12,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 os.chdir(PROJECT_ROOT)
 
-os.environ["LOG_DIR"] = "logs_cht"
-os.environ["STATE_FILE"] = "bs_cht.json"
-os.environ["OUTBOX_FILE"] = "ob_cht.json"
-os.environ["LOCAL_ADMIN_PASSWORD_FILE"] = "la_cht.txt"
-os.environ["ADMIN_MODE"] = "strict"
-os.environ["ADMIN_IDS"] = "admin@example.com"
-os.environ.setdefault("WEBUI_AUTH", "none")
+os.environ.setdefault("LOG_DIR", "logs_cht")
+os.environ.setdefault("STATE_FILE", "bs_cht.json")
+os.environ.setdefault("OUTBOX_FILE", "ob_cht.json")
+os.environ["DELIVERED_FILE"] = "dl_test.json"
+os.environ.setdefault("LOCAL_ADMIN_PASSWORD_FILE", "la_cht.txt")
+
 FAILED = []
 
 
@@ -201,6 +200,84 @@ async def main() -> int:
         resp = await client.delete("/api/channels/ch02")
         check(resp.status == 200, "DELETE работает", str(resp.status))
         check("ch02" not in app.state_manager.notification_channels, "канал удалён")
+
+        print("\n12) Чат по умолчанию")
+        resp = await client.get("/api/default-chat")
+        data = await resp.json()
+        check(resp.status == 200, "GET /api/default-chat отвечает", str(resp.status))
+        check("chat_id" in data, "в ответе есть chat_id")
+        check("channels_using" in data, "в ответе есть счётчик каналов")
+        check("options" in data, "в ответе есть список вариантов")
+
+        options = data.get("options", [])
+        check(len(options) >= 2, "варианты для выбора есть", str(len(options)))
+        check(all("chat_id" in o and "channels" in o for o in options),
+              "каждый вариант содержит chat_id и каналы")
+
+        # Все варианты — из существующих каналов
+        known = {
+            info.get("chat_id")
+            for info in app.state_manager.notification_channels.values()
+            if info.get("chat_id")
+        }
+        unknown = [o["chat_id"] for o in options if o["chat_id"] not in known]
+        check(not unknown, "все варианты соответствуют каналам", str(unknown))
+
+        # Каналы варианта действительно ведут в этот чат
+        mismatch = []
+        for opt in options:
+            for name in opt["channels"]:
+                if app.state_manager.get_channel_chat_id(name) != opt["chat_id"]:
+                    mismatch.append(name)
+        check(not mismatch, "каналы варианта ведут именно в этот чат", str(mismatch))
+
+        resp = await client.post(
+            "/api/default-chat",
+            json={"chat_id": "newdefaultchat1234567890", "chat_title": "Общий"},
+        )
+        data = await resp.json()
+        check(resp.status == 200, "POST меняет чат", str(resp.status))
+        check(data.get("chat_id") == "newdefaultchat1234567890",
+              "новое значение применено", str(data.get("chat_id")))
+        # Прежнее значение может быть None — если чат по умолчанию был не задан
+        check("previous" in data, "прежнее значение возвращено в ответе",
+              str(list(data.keys())))
+
+        check(app.state_manager.default_chat == "newdefaultchat1234567890",
+              "состояние обновлено", str(app.state_manager.default_chat))
+        check(app.state_manager.raw.get("default_chat_title") == "Общий",
+              "название сохранено",
+              str(app.state_manager.raw.get("default_chat_title")))
+
+        resp = await client.get("/api/default-chat")
+        data = await resp.json()
+        check(data.get("chat_id") == "newdefaultchat1234567890",
+              "значение сохранилось", str(data.get("chat_id")))
+
+        # Слишком короткий идентификатор отклоняется
+        resp = await client.post("/api/default-chat", json={"chat_id": "abc"})
+        check(resp.status == 400, "короткий chat_id → 400", str(resp.status))
+
+        # Очистка
+        resp = await client.post("/api/default-chat", json={"chat_id": ""})
+        data = await resp.json()
+        check(resp.status == 200, "очистка принята", str(resp.status))
+        check(data.get("chat_id") is None, "значение очищено", str(data.get("chat_id")))
+        check(app.state_manager.default_chat is None,
+              "состояние очищено", str(app.state_manager.default_chat))
+
+        # В уведомлении без канала используется чат по умолчанию
+        await client.post(
+            "/api/default-chat", json={"chat_id": "chat-by-default-123456"}
+        )
+        check(app.state_manager.default_chat == "chat-by-default-123456",
+              "чат по умолчанию задан для проверки доставки")
+
+        # Страница содержит элементы редактирования
+        resp = await client.get("/channels")
+        html_page = await resp.text()
+        for marker in ("dc-edit", "dc-form", "dc-chat-id", "dc-clear", "default-chat"):
+            check(marker in html_page, f"элемент {marker} на странице")
 
         resp = await client.get("/channels")
         html = await resp.text()

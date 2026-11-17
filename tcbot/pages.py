@@ -66,7 +66,7 @@ CHANNELS_CARD = r"""<div class="card" id="card-channels">
     </div>
     <div class="fb-field">
       <span class="fb-label">chat_id</span>
-      <input type="text" id="ch-id" placeholder="например 3f8a2b1c…">
+      <input type="text" id="ch-id" placeholder="3f8a2b1c…">
     </div>
     <div class="fb-field">
       <span class="fb-label">Название чата</span>
@@ -92,6 +92,16 @@ CHANNELS_CARD = r"""<div class="card" id="card-channels">
       <span class="fb-label">Название чата</span>
       <input type="text" id="edit-chat-title" placeholder="необязательно">
     </div>
+    <div class="fb-field">
+      <span class="fb-label">При восстановлении</span>
+      <select id="edit-incident-mode">
+        <option value="">как в настройках</option>
+        <option value="notify">только учесть</option>
+        <option value="delete">удалить проблему</option>
+        <option value="resolve">прислать «решено»</option>
+        <option value="both">удалить и прислать</option>
+      </select>
+    </div>
     <div class="fb-actions">
       <button type="button" id="edit-save">Сохранить</button>
       <button type="button" class="secondary" id="edit-cancel">Отмена</button>
@@ -102,10 +112,11 @@ CHANNELS_CARD = r"""<div class="card" id="card-channels">
     <table class="data-table channels-table">
       <thead>
         <tr>
-          <th data-sort="name" style="width:26%;">Канал</th>
-          <th data-sort="chat_id" style="width:30%;">Chat ID</th>
-          <th data-sort="created" style="width:14%;">Создан</th>
-          <th style="width:18%;">Кем</th>
+          <th data-sort="name" style="width:22%;">Канал</th>
+          <th data-sort="chat_id" style="width:26%;">Chat ID</th>
+          <th style="width:16%;">При восстановлении</th>
+          <th data-sort="created" style="width:12%;">Создан</th>
+          <th style="width:12%;">Кем</th>
           <th style="width:12%;"></th>
         </tr>
       </thead>
@@ -119,9 +130,53 @@ CHANNELS_CARD = r"""<div class="card" id="card-channels">
     <button type="button" class="secondary small" id="ch-next">Вперёд →</button>
   </div>
 
-  <p class="dim fs-12" style="margin:10px 0 0;">
-    Чат по умолчанию: <code id="default-chat">—</code>
-  </p>
+  <div class="default-chat-block">
+    <div class="dc-head">
+      <span class="dc-title">Чат по умолчанию</span>
+      <span class="dim fs-11">куда уходят уведомления без указания канала</span>
+      <span class="spacer"></span>
+      <button type="button" class="secondary small" id="dc-edit">Изменить</button>
+    </div>
+
+    <div class="dc-view" id="dc-view">
+      <code id="default-chat">—</code>
+      <span class="dim fs-11" id="dc-usage"></span>
+    </div>
+
+    <div class="dc-form hidden" id="dc-form">
+      <div class="fb-field" style="flex:1 1 340px;">
+        <span class="fb-label">Чат из списка каналов</span>
+        <select id="dc-select" style="width:100%;">
+          <option value="">— выберите канал —</option>
+        </select>
+      </div>
+      <div class="fb-actions">
+        <button type="button" class="small" id="dc-apply">Сделать основным</button>
+        <button type="button" class="secondary small" id="dc-cancel">Отмена</button>
+        <button type="button" class="danger small" id="dc-clear">Очистить</button>
+      </div>
+
+      <details class="dc-manual">
+        <summary>Ввести chat_id вручную</summary>
+        <div class="dc-form">
+          <div class="fb-field fb-search">
+            <span class="fb-label">chat_id</span>
+            <input type="text" id="dc-chat-id" placeholder="например 3f8a2b1c…"
+                   autocomplete="off">
+          </div>
+          <div class="fb-field">
+            <span class="fb-label">Название (необязательно)</span>
+            <input type="text" id="dc-chat-title" placeholder="Общий чат" autocomplete="off">
+          </div>
+          <div class="fb-actions">
+            <button type="button" class="small" id="dc-save-manual">Сохранить</button>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="dc-hint dim fs-11 hidden" id="dc-hint"></div>
+  </div>
 </div>"""
 
 
@@ -181,7 +236,19 @@ SEND_CARD = r"""<div class="card">
 
 SETTINGS_CARD = r"""<div class="card">
     <h2>Настройки</h2>
-    <div class="row"><span class="label">Удалять при восстановлении</span>
+
+    <div class="row row-wide">
+      <span class="label">Что делать при восстановлении</span>
+      <select id="set-incident-mode">
+        <option value="notify">ничего — только записать в историю</option>
+        <option value="delete">удалить сообщение о проблеме</option>
+        <option value="resolve">отправить сообщение «восстановлено»</option>
+        <option value="both">удалить и отправить «восстановлено»</option>
+      </select>
+    </div>
+    <p class="dim fs-12" id="set-mode-hint" style="margin:-4px 0 12px;"></p>
+
+    <div class="row"><span class="label">Разрешить удаление сообщений</span>
       <select id="set-delete"><option value="false">нет</option><option value="true">да</option></select></div>
     <div class="row"><span class="label">Порог удаления, ч</span>
       <input id="set-delete-hours" type="number" min="0"></div>
@@ -274,6 +341,173 @@ DIAGNOSTICS_CARD = r"""<div class="card" id="card-diag">
   </div>
 </div>"""
 
+CHANNEL_STATS_CARD = r"""<div class="card" id="card-channel-charts">
+  <h2>
+    <span>Динамика</span>
+    <span class="h2-right">
+      <span id="cs-charts-status" class="dim fs-11"></span>
+    </span>
+  </h2>
+
+  <div class="chart-box" style="margin-bottom:14px;">
+    <div class="chart-title">
+      <span>Временная шкала — что и когда уходило</span>
+      <span class="h2-right" style="gap:8px;">
+        <select id="tl-bucket" style="padding:3px 8px; font-size:12px; width:auto;">
+          <option value="auto" selected>шаг: авто</option>
+          <option value="1">1 минута</option>
+          <option value="5">5 минут</option>
+          <option value="15">15 минут</option>
+          <option value="30">30 минут</option>
+          <option value="60">1 час</option>
+          <option value="180">3 часа</option>
+        </select>
+        <span class="chart-value" id="tl-status">—</span>
+      </span>
+    </div>
+    <div class="timeline-wrap">
+      <canvas id="chart-timeline"></canvas>
+    </div>
+    <div class="timeline-legend" id="tl-legend"></div>
+  </div>
+
+  <div class="chart-box" style="margin-bottom:14px;">
+    <div class="chart-title">
+      <span>Отправлено по каналам</span>
+      <span class="chart-value" id="cv-total">—</span>
+    </div>
+    <canvas id="chart-channels"></canvas>
+    <div class="timeline-legend" style="margin-top:6px;">
+      <span class="tl-item"><i class="tl-dot" style="background:var(--err);border-radius:2px;"></i>проблемы</span>
+      <span class="tl-item"><i class="tl-dot" style="background:var(--ok);border-radius:2px;"></i>решения</span>
+      <span class="tl-item" style="opacity:.7;">высота — всего сообщений</span>
+    </div>
+  </div>
+
+  <div class="charts-grid">
+    <div class="chart-box">
+      <div class="chart-title">
+        <span>Строгость Zabbix</span><span class="chart-value" id="cv-severity">—</span>
+      </div>
+      <div class="chart-body"><div id="severity-bars" class="hbars"></div></div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">
+        <span>Статусы</span><span class="chart-value" id="cv-statuses-2">—</span>
+      </div>
+      <div class="chart-body"><div id="status-bars-2" class="hbars"></div></div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">
+        <span>Отправлено и отказы</span><span class="chart-value" id="cv-sent-2">—</span>
+      </div>
+      <canvas id="chart-sent-2"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">
+        <span>Задержка доставки</span><span class="chart-value" id="cv-latency-2">—</span>
+      </div>
+      <canvas id="chart-latency-2"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="card" id="card-channel-stats">
+  <h2>
+    <span>Статистика каналов <span class="badge badge-count" id="cs-count">0</span></span>
+    <span class="h2-right">
+      <select id="cs-hours" style="padding:3px 8px; font-size:12px; width:auto;">
+        <option value="6">6 часов</option>
+        <option value="24" selected>сутки</option>
+        <option value="72">3 суток</option>
+        <option value="168">неделя</option>
+      </select>
+      <button type="button" class="secondary small" id="cs-refresh">Обновить</button>
+    </span>
+  </h2>
+
+  <div class="cs-totals" id="cs-totals"></div>
+
+  <div class="filter-bar">
+    <div class="fb-field fb-search">
+      <span class="fb-label">Поиск</span>
+      <input type="search" id="cs-search" placeholder="Имя канала">
+    </div>
+    <div class="fb-field">
+      <span class="fb-label">Сортировка</span>
+      <select id="cs-sort">
+        <option value="total">по количеству</option>
+        <option value="name">по имени</option>
+        <option value="failed">по отказам</option>
+        <option value="latency">по задержке</option>
+        <option value="last">по последней отправке</option>
+      </select>
+    </div>
+    <div class="fb-actions">
+      <span class="dim fs-12" id="cs-filtered"></span>
+    </div>
+  </div>
+
+  <div class="table-scroll" style="max-height:none;">
+    <table class="data-table cs-table">
+      <thead>
+        <tr>
+          <th style="width:22%;">Канал</th>
+          <th data-sort="total" style="width:11%;">Отправлено</th>
+          <th style="width:10%;">Отказы</th>
+          <th style="width:12%;">Успех</th>
+          <th style="width:12%;">Ср. задержка</th>
+          <th style="width:18%;">Статусы</th>
+          <th style="width:15%;">Последняя</th>
+        </tr>
+      </thead>
+      <tbody id="cs-rows"></tbody>
+    </table>
+  </div>
+
+  <p class="dim fs-12" style="margin:10px 0 0;">
+    <span class="cs-legend">
+      <i class="cs-legend-dot" style="background:var(--err)"></i> проблемы
+      <i class="cs-legend-dot" style="background:var(--ok)"></i> решения
+    </span>
+    — в столбике видно соотношение; под ним числа «проблем / решено».
+    Данные накапливаются с момента запуска бота. Период переключается сверху.
+  </p>
+</div>"""
+
+BACKUPS_CARD = r"""<div class="card" id="card-backups">
+  <h2>
+    <span>Резервные копии <span class="badge badge-count" id="bk-count">0</span></span>
+    <span class="h2-right">
+      <button type="button" class="secondary small" id="bk-create">Создать копию</button>
+      <button type="button" class="secondary small" id="bk-refresh">Обновить</button>
+    </span>
+  </h2>
+
+  <div class="cs-totals" id="bk-totals"></div>
+
+  <div class="table-scroll" style="max-height:none;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:40%;">Копия</th>
+          <th style="width:12%;">Размер</th>
+          <th style="width:18%;">Создана</th>
+          <th style="width:15%;">Содержимое</th>
+          <th style="width:15%;"></th>
+        </tr>
+      </thead>
+      <tbody id="bk-rows"></tbody>
+    </table>
+  </div>
+
+  <p class="dim fs-12" style="margin:10px 0 0;">
+    Копии создаются автоматически раз в сутки и вручную.
+    Хранятся последние <span id="bk-keep">20</span>.
+    Восстановление сохраняет текущее состояние перед заменой — откатиться можно всегда.
+  </p>
+</div>"""
+
 # ============================================================================
 # ОПИСАНИЕ СТРАНИЦ
 # ============================================================================
@@ -313,6 +547,20 @@ PAGES: Dict[str, Dict[str, Any]] = {
         "description": "Кто может управлять ботом командами в чате. Записи из config.py удалить нельзя.",
         "content": ADMINS_CARD,
         "scripts": ["admins"],
+    },
+    "channel-stats": {
+        "title": "Статистика каналов",
+        "icon": "📊",
+        "description": "Подробности по каждому каналу: сколько отправлено, отказы, задержка и статусы.",
+        "content": CHANNEL_STATS_CARD,
+        "scripts": ["channel-stats"],
+    },
+    "backups": {
+        "title": "Резервные копии",
+        "icon": "💾",
+        "description": "Копии состояния бота: каналы, администраторы, настройки, история.",
+        "content": BACKUPS_CARD,
+        "scripts": ["backups"],
     },
     "diagnostics": {
         "title": "Диагностика",
@@ -388,6 +636,8 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
         <div class="ua-group ua-group-static"><span class="ua-group-name">Управление</span></div>
         <div class="ua-section">
           <a class="ua-item" href="/channels"><span class="ua-ico">📢</span>Каналы</a>
+          <a class="ua-item" href="/channel-stats"><span class="ua-ico">📊</span>Статистика</a>
+          <a class="ua-item" href="/backups"><span class="ua-ico">💾</span>Резервные копии</a>
           <a class="ua-item" href="/outbox"><span class="ua-ico">📦</span>Очередь</a>
           <a class="ua-item" href="/send"><span class="ua-ico">✉️</span>Отправка</a>
         </div>

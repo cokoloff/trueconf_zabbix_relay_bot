@@ -114,9 +114,13 @@ SSO_REDIRECT_URI = os.getenv("SSO_REDIRECT_URI", "")
 # Роли Keycloak (realm или клиента), дающие доступ
 SSO_ADMIN_ROLES = os.getenv("SSO_ADMIN_ROLES", "tcbot-admin")
 SSO_VIEWER_ROLES = os.getenv("SSO_VIEWER_ROLES", "tcbot-viewer")
-# ВАЖНО: scope 'roles' и 'groups' нужны, чтобы Keycloak положил роли и группы
-# в токен. Без них пользователь войдёт, но ролей не будет.
-SSO_SCOPE = os.getenv("SSO_SCOPE", "openid profile email roles groups")
+# ВАЖНО: без scope 'roles' Keycloak не положит роли в токен — пользователь
+# войдёт, но ролей не будет. 'groups' не запрашиваем: роли берутся из
+# realm_access и resource_access, а этот scope часто не назначен клиенту
+# (Keycloak отвечает invalid_scope и вход ломается полностью).
+# Если роли у вас раздаются группами LDAP, добавьте 'groups' сами —
+# бот подстроится и отбросит его, если клиенту он недоступен.
+SSO_SCOPE = os.getenv("SSO_SCOPE", "openid profile email roles")
 
 # Время жизни сессии панели (сек)
 SSO_SESSION_TTL = int(os.getenv("SSO_SESSION_TTL", str(8 * 3600)))
@@ -228,6 +232,49 @@ METRICS_INTERVAL = int(os.getenv("METRICS_INTERVAL", "60"))
 
 # Период сохранения истории на диск (сек)
 METRICS_SAVE_INTERVAL = int(os.getenv("METRICS_SAVE_INTERVAL", "300"))
+
+# ============================================================================
+# РЕЗЕРВНОЕ КОПИРОВАНИЕ СОСТОЯНИЯ
+# ============================================================================
+# Копии файла состояния (каналы, администраторы, настройки, история).
+# Создаются по расписанию и вручную из панели.
+BACKUP_ENABLED = os.getenv("BACKUP_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+BACKUP_DIR = os.getenv("BACKUP_DIR", "backups")
+
+# Сколько последних копий хранить
+BACKUP_KEEP = int(os.getenv("BACKUP_KEEP", "20"))
+
+# Период автоматических копий (часы). 0 — только вручную.
+BACKUP_INTERVAL_HOURS = float(os.getenv("BACKUP_INTERVAL_HOURS", "24"))
+
+# ============================================================================
+# УПРАВЛЕНИЕ СЛУЖБОЙ ИЗ ПАНЕЛИ
+# ============================================================================
+# Кнопка перезапуска в панели. По умолчанию выключена: процесс должен
+# запускаться под systemd с правами на перезапуск.
+SERVICE_RESTART_ENABLED = os.getenv("SERVICE_RESTART_ENABLED", "false").lower() in (
+    "1", "true", "yes", "on"
+)
+
+# Имя юнита systemd (как в systemctl restart <имя>)
+SYSTEMD_SERVICE = os.getenv("SYSTEMD_SERVICE", "trueconf-bot")
+
+# Необязательный путь к systemctl: панель может не иметь его в PATH
+SYSTEMCTL_PATH = os.getenv("SYSTEMCTL_PATH", "systemctl")
+
+# Способ перезапуска:
+#   systemd — systemctl restart <служба>
+#   exit    — завершить процесс (контейнер поднимется сам)
+#   auto    — exit в контейнере, иначе systemd
+SERVICE_RESTART_MODE = os.getenv("SERVICE_RESTART_MODE", "auto").strip().lower()
+
+# ============================================================================
+# ЗАЩИТА ОТ ДУБЛЕЙ ДОСТАВКИ
+# ============================================================================
+# Окно, в течение которого повторное уведомление с тем же текстом не отправляется:
+# Zabbix может повторить вебхук, а сообщение уже доставлено.
+DELIVERED_DEDUP_WINDOW = float(os.getenv("DELIVERED_DEDUP_WINDOW", "900"))
+DELIVERED_FILE = os.getenv("DELIVERED_FILE", "bot_delivered.json")
 
 # ============================================================================
 # ДОСТАВКА УВЕДОМЛЕНИЙ

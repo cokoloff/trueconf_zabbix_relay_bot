@@ -550,19 +550,72 @@ code {
 .pager button:disabled { opacity: .4; }
 
 /* ---------------- Графики «Динамика» ---------------- */
-.charts-grid {
+/* Показатели состояния: цифры вместо почти всегда статичных графиков */
+.stat-tiles {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
   margin-top: 10px;
 }
-@media (min-width: 1200px) {
-  .charts-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1180px) {
+  .stat-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .stat-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.stat-tile {
+  background: var(--bg-tile);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.stat-value {
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--aq-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stat-value.ok { color: var(--ok); }
+.stat-value.err { color: var(--err); }
+.stat-value.warn { color: var(--warn); }
+.stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Сетка графиков: все блоки одной высоты.
+   Высота задаётся один раз через --chart-h, чтобы канвас и блок статусов
+   не «плыли» друг относительно друга. */
+.charts-grid {
+  --chart-h: 110px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 10px;
+  align-items: stretch;
+}
+/* Четыре колонки держим только на широком экране, иначе подписи не читаются */
+@media (max-width: 1280px) {
+  .charts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 700px) {
   .charts-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
 .chart-box {
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--border-light);
   border-radius: 8px;
   padding: 8px 10px 10px;
@@ -580,13 +633,55 @@ code {
   display: flex;
   justify-content: space-between;
   gap: 8px;
+  flex: 0 0 auto;
 }
 .chart-title .chart-value { color: var(--aq-primary); font-weight: 600; }
+
+/* Канвас и блок статусов занимают одну и ту же высоту */
 .chart-box canvas {
   display: block;
   width: 100% !important;
-  height: 110px !important;
+  height: var(--chart-h) !important;
 }
+.chart-body {
+  height: var(--chart-h);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* Блок статусов: полосы распределяются по доступной высоте */
+.chart-body .hbars {
+  gap: 5px;
+  padding: 0;
+  justify-content: center;
+}
+.chart-body .hbar-row { font-size: 11px; }
+.chart-body .hbar-name { flex: 0 0 78px; }
+.chart-body .hbar-track { height: 6px; }
+.chart-body .hbar-empty {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; padding: 0;
+}
+
+/* Горизонтальные полосы для разбивки по статусам */
+.hbars { display: flex; flex-direction: column; gap: 7px; padding-top: 4px; }
+.hbar-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.hbar-name {
+  flex: 0 0 96px; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hbar-track {
+  flex: 1 1 auto; height: 8px; background: var(--border-light);
+  border-radius: 4px; overflow: hidden;
+}
+.hbar-fill { height: 100%; border-radius: 4px; transition: width .25s ease; }
+.hbar-count {
+  flex: 0 0 auto; color: var(--text-main); font-weight: 600;
+  font-variant-numeric: tabular-nums; min-width: 34px; text-align: right;
+}
+.hbar-empty { color: var(--text-dim); font-size: 12px; padding: 6px 0; }
 
 /* ---------------- Календарь недели ---------------- */
 .activity-week {
@@ -698,6 +793,214 @@ code {
   .section-head { flex-wrap: wrap; gap: 10px; }
   .section-head .activity-week { margin-left: 0; }
 }
+
+/* Пункт меню с необратимым действием (перезапуск службы) */
+.ua-item.ua-danger { color: var(--err); }
+.ua-item.ua-danger:hover { background: var(--err-bg); }
+
+/* Режим инцидентов в строке канала */
+.ch-mode {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+.ch-mode.own {
+  background: var(--aq-primary-light, rgba(31, 78, 140, .12));
+  color: var(--aq-primary);
+  font-weight: 600;
+}
+.ch-mode.inherits {
+  color: var(--text-muted);
+  background: var(--thead-bg);
+}
+
+/* ---------------- Чат по умолчанию ---------------- */
+.default-chat-block {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-light);
+}
+.dc-head {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap; margin-bottom: 8px;
+}
+.dc-head .spacer { flex: 1 1 auto; }
+.dc-title {
+  font-size: 12px; font-weight: 600; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: .03em;
+}
+.dc-view { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dc-view code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px; padding: 3px 8px; border-radius: 4px;
+  background: var(--bg-tile); border: 1px solid var(--border-light);
+  word-break: break-all;
+}
+.dc-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.dc-form .fb-search { flex: 1 1 320px; }
+.dc-form input {
+  width: 100%; padding: 6px 9px; font-size: 13px;
+  border: 1px solid var(--border-light); border-radius: 5px;
+  background: var(--bg-card); color: var(--text-main);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.dc-form input:focus {
+  outline: none; border-color: var(--aq-primary);
+  box-shadow: 0 0 0 2px rgba(31, 78, 140, .15);
+}
+.dc-hint {
+  margin-top: 8px; padding: 6px 10px; border-radius: 5px;
+  background: var(--warn-bg); color: var(--warn);
+}
+.dc-manual {
+  flex: 1 1 100%;
+  margin-top: 4px;
+  border-top: 1px dashed var(--border-light);
+  padding-top: 8px;
+}
+.dc-manual summary {
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  user-select: none;
+  padding: 2px 0;
+}
+.dc-manual summary:hover { color: var(--aq-primary); }
+.dc-manual[open] summary { margin-bottom: 8px; }
+#dc-select {
+  width: 100%; padding: 6px 9px; font-size: 13px;
+  border: 1px solid var(--border-light); border-radius: 5px;
+  background: var(--bg-card); color: var(--text-main);
+}
+#dc-select:focus {
+  outline: none; border-color: var(--aq-primary);
+  box-shadow: 0 0 0 2px rgba(31, 78, 140, .15);
+}
+
+/* ---------------- Статистика каналов ---------------- */
+/* Широкая строка настроек (селект режима) */
+.row.row-wide { align-items: flex-start; }
+.row.row-wide select { flex: 1 1 320px; max-width: 420px; }
+
+/* Временная шкала: точки, размер зависит от числа сообщений */
+.timeline-wrap { position: relative; }
+.timeline-legend {
+  display: flex; flex-wrap: wrap; gap: 10px;
+  margin-top: 8px; font-size: 11.5px; color: var(--text-muted);
+}
+.timeline-legend .tl-item { display: inline-flex; align-items: center; gap: 5px; }
+.timeline-legend .tl-dot {
+  width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
+}
+.tl-tip {
+  position: fixed;
+  z-index: 1000;
+  min-width: 190px;
+  max-width: 320px;
+  padding: 9px 11px;
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  border: 1px solid var(--border-light);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .28);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+}
+.tl-tip-head {
+  color: var(--text-muted); font-size: 11px;
+  padding-bottom: 6px; margin-bottom: 6px;
+  border-bottom: 1px solid var(--border-light);
+}
+.tl-tip-head strong { color: var(--text-main); font-size: 13px; }
+.tl-tip-row { display: flex; align-items: center; gap: 6px; }
+.tl-tip-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.tl-tip-name {
+  flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-tip-count {
+  font-weight: 600; color: var(--text-muted); flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.cs-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.cs-total {
+  background: var(--bg-tile); border: 1px solid var(--border-light);
+  border-radius: 8px; padding: 10px 12px;
+}
+.cs-total-value {
+  font-size: 19px; font-weight: 700; color: var(--aq-primary);
+  line-height: 1.1; font-variant-numeric: tabular-nums;
+}
+.cs-total-value.ok { color: var(--ok); }
+.cs-total-value.err { color: var(--err); }
+.cs-total-label {
+  font-size: 11px; color: var(--text-muted); margin-top: 2px;
+  text-transform: uppercase; letter-spacing: .03em;
+}
+
+.cs-table td { vertical-align: middle; }
+.cs-table .cs-name { font-weight: 600; color: var(--heading-color); }
+.cs-table .cs-num { font-variant-numeric: tabular-nums; }
+.cs-table .cs-num.err { color: var(--err); font-weight: 600; }
+
+/* Мини-график распределения по часам в строке канала.
+   Столбик делится на проблемы (красное) и решения (зелёное). */
+.cs-spark-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 3px; min-height: 22px;
+}
+.cs-spark { display: flex; align-items: flex-end; gap: 1px; height: 22px; }
+.cs-seg-stack {
+  display: flex; flex-direction: column-reverse;
+  width: 3px; border-radius: 1px; overflow: hidden;
+  justify-content: flex-start;
+}
+.cs-spark i.cs-seg { display: block; width: 3px; border-radius: 0; }
+.cs-spark i.cs-seg.zero {
+  height: 2px; background: var(--border-light); border-radius: 1px;
+}
+.cs-spark-sum {
+  font-size: 10.5px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; flex: 0 0 auto;
+}
+.cs-spark-sum b { font-weight: 600; }
+
+.cs-legend { display: inline-flex; align-items: center; gap: 4px; }
+.cs-legend-dot {
+  display: inline-block; width: 8px; height: 8px;
+  border-radius: 2px; margin-left: 6px;
+}
+.cs-legend-dot:first-child { margin-left: 0; }
+
+/* Полоса успешности */
+.cs-rate { display: flex; align-items: center; gap: 7px; }
+.cs-rate-track {
+  flex: 1 1 auto; height: 6px; background: var(--border-light);
+  border-radius: 3px; overflow: hidden; min-width: 40px;
+}
+.cs-rate-fill { height: 100%; border-radius: 3px; background: var(--ok); }
+.cs-rate-fill.warn { background: var(--warn); }
+.cs-rate-fill.err { background: var(--err); }
+.cs-rate-text { font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
+.cs-badges { display: flex; gap: 4px; flex-wrap: wrap; }
+.cs-badge {
+  font-size: 10.5px; padding: 1px 6px; border-radius: 4px;
+  background: var(--thead-bg); color: var(--thead-text); white-space: nowrap;
+}
+.cs-badge.problem { background: var(--err-bg); color: var(--err); }
+.cs-badge.resolved { background: var(--ok-bg); color: var(--ok); }
 
 /* ---------------- Диагностика ---------------- */
 .diag-grid {

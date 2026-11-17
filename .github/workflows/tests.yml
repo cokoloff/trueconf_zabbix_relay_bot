@@ -33,7 +33,7 @@ jobs:
 
       - name: Run tests
         run: |
-          for t in markup roles backoff channels localadmin sso outbox diagnostics metrics smoke; do
+          for t in markup roles backoff channels localadmin sso outbox diagnostics metrics dedup service backup incidents smoke; do
             echo "=== test_$t ==="
             python "scripts/test_$t.py"
           done

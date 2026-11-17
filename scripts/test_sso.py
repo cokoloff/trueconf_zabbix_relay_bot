@@ -13,12 +13,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 os.chdir(PROJECT_ROOT)
 
-os.environ["LOG_DIR"] = "logs_sso_t"
-os.environ["STATE_FILE"] = "bs_sso_t.json"
-os.environ["OUTBOX_FILE"] = "ob_sso_t.json"
-os.environ["ADMIN_MODE"] = "strict"
-os.environ["ADMIN_IDS"] = "admin@example.com"
-os.environ.setdefault("WEBUI_AUTH", "none")
+os.environ.setdefault("LOG_DIR", "logs_sso_t")
+os.environ.setdefault("STATE_FILE", "bs_sso_t.json")
+os.environ.setdefault("OUTBOX_FILE", "ob_sso_t.json")
+os.environ["DELIVERED_FILE"] = "dl_test.json"
+
 FAILED = []
 
 
@@ -168,6 +167,95 @@ async def main() -> int:
     expired = SessionSigner("key", ttl=0).dumps({"sub": "1"})
     await asyncio.sleep(1.1)
     check(SessionSigner("key", ttl=0).loads(expired) is None, "истёкшая cookie отклоняется")
+
+    print("\n8b) Подбор scope для Keycloak")
+    from tcbot.sso import KeycloakSSO
+
+    def make_sso(scope: str, accepted: set):
+        """SSO с подменённой проверкой scope."""
+        client = KeycloakSSO(
+            server_url="https://auth.example.com",
+            realm="test",
+            client_id="tcbot",
+            client_secret="secret",
+            redirect_uri="https://bot.example.com/auth/callback",
+            scope=scope,
+            verify_ssl=False,
+        )
+
+        async def fake_discovery():
+            return {"authorization_endpoint": "https://auth.example.com/auth"}
+
+        async def fake_accepted(value: str) -> bool:
+            return set(value.split()) <= accepted
+
+        client.discovery = fake_discovery
+        client._scope_accepted = fake_accepted
+        return client
+
+    # Keycloak отклонил groups — вход должен работать без него
+    sso_groups = make_sso(
+        "openid profile email roles groups",
+        {"openid", "profile", "email", "roles"},
+    )
+    resolved = await sso_groups.resolve_scope()
+    check("groups" not in resolved.split(), "недоступный scope убран из запроса", resolved)
+    check("roles" in resolved.split(), "рабочий scope сохранён", resolved)
+    check(resolved.split()[0] == "openid", "openid запрашивается первым", resolved)
+    check("groups" in sso_groups._rejected_scopes, "отброшенный scope запомнен",
+          str(sso_groups._rejected_scopes))
+
+    # Повторный вход не тратит запросы на проверку
+    calls = {"n": 0}
+    original = sso_groups._scope_accepted
+
+    async def counting(value: str) -> bool:
+        calls["n"] += 1
+        return await original(value)
+
+    sso_groups._scope_accepted = counting
+    again = await sso_groups.resolve_scope()
+    check(again == resolved, "повторный вход даёт тот же scope", again)
+    check(calls["n"] <= 1, "повторно не проверяет рабочий набор", str(calls["n"]))
+
+    # Все scope доступны — запрашиваем полный набор
+    sso_ok = make_sso(
+        "openid profile email roles groups",
+        {"openid", "profile", "email", "roles", "groups"},
+    )
+    full = await sso_ok.resolve_scope()
+    check("groups" in full.split(), "доступный scope не отбрасывается", full)
+
+    # Пустой scope — остаётся openid
+    sso_empty = make_sso("", {"openid"})
+    minimal = await sso_empty.resolve_scope()
+    check(minimal == "openid", "без настроек запрашивается только openid", minimal)
+
+    print("\n8c) Настройки scope по умолчанию")
+    import config as cfg_module
+    default_scope = cfg_module.SSO_SCOPE
+    check("openid" in default_scope, "openid запрашивается всегда", default_scope)
+    check("roles" in default_scope,
+          "roles запрашивается — без него нет ролей", default_scope)
+    check("groups" not in default_scope,
+          "groups не запрашивается по умолчанию", default_scope)
+
+    # Роли извлекаются без groups
+    sso_roles = make_sso("openid profile email roles", {"openid", "profile", "email", "roles"})
+    claims = {
+        "realm_access": {"roles": ["tcbot-admin", "offline_access"]},
+        "resource_access": {"tcbot": {"roles": ["tcbot-viewer"]}},
+    }
+    extracted = sso_roles.extract_roles(claims)
+    check("tcbot-admin" in extracted, "роль из realm_access найдена", str(extracted))
+    check("tcbot-viewer" in extracted, "роль клиента найдена", str(extracted))
+
+    # На всякий случай: если роли придут группой, они тоже распознаются
+    group_claims = {"realm_access": {"roles": ["offline_access"]},
+                    "groups": ["/infra/tcbot-admin"]}
+    group_roles = sso_roles.extract_roles(group_claims)
+    check("tcbot-admin" in group_roles,
+          "роль из groups тоже поддерживается (если scope включат)", str(group_roles))
 
     print("\n9) Ключи JWKS и разбор токена")
     from tcbot.sso import decode_jwt_unverified

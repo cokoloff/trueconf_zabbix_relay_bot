@@ -15,6 +15,7 @@ os.chdir(PROJECT_ROOT)
 os.environ["LOG_DIR"] = "logs_dg"
 os.environ["STATE_FILE"] = "bs_dg.json"
 os.environ["OUTBOX_FILE"] = "ob_dg.json"
+os.environ["DELIVERED_FILE"] = "dl_test.json"
 os.environ["LOCAL_ADMIN_PASSWORD_FILE"] = "la_dg.txt"
 os.environ["ADMIN_MODE"] = "strict"
 os.environ["ADMIN_IDS"] = "admin@example.com"

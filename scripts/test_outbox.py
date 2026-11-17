@@ -12,14 +12,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)
 
-os.environ["WEB_SERVER_PORT"] = "18090"
-os.environ["LOG_DIR"] = "logs_outbox"
-os.environ["STATE_FILE"] = "bot_state_outbox.json"
-os.environ["OUTBOX_FILE"] = "bot_outbox_test.json"
-os.environ["ADMIN_MODE"] = "strict"
-os.environ["ADMIN_IDS"] = "admin@example.com"
-os.environ.setdefault("WEBUI_AUTH", "none")
-os.environ["OUTBOX_TTL_HOURS"] = "48"
+os.environ.setdefault("WEB_SERVER_PORT", "18090")
+os.environ.setdefault("LOG_DIR", "logs_outbox")
+os.environ.setdefault("STATE_FILE", "bot_state_outbox.json")
+os.environ.setdefault("OUTBOX_FILE", "bot_outbox_test.json")
+os.environ["DELIVERED_FILE"] = "dl_test.json"
+os.environ.setdefault("OUTBOX_TTL_HOURS", "48")
+
 FAILED = []
 
 

@@ -28,17 +28,23 @@ if str(PROJECT_ROOT) not in sys.path:
 os.chdir(PROJECT_ROOT)
 from typing import Any, Dict, List
 
-# Тесты не должны зависеть от .env хоста: значения задаём принудительно.
-os.environ["WEB_SERVER_PORT"] = "18080"
-os.environ["LOG_DIR"] = "logs_test"
-os.environ["STATE_FILE"] = "bot_state_test.json"
-os.environ["OUTBOX_FILE"] = "bot_outbox_test.json"
-os.environ["TOKEN_FILE"] = "bot_token_test.json"
-os.environ["HEARTBEAT_MODE"] = "smart"
-os.environ["ADMIN_MODE"] = "strict"
+os.environ.setdefault("WEB_SERVER_PORT", "18080")
+os.environ.setdefault("LOG_DIR", "logs_test")
+os.environ.setdefault("STATE_FILE", "bot_state_test.json")
+os.environ.setdefault("OUTBOX_FILE", "bot_outbox_test.json")
+os.environ["DELIVERED_FILE"] = "dl_test.json"
+os.environ.setdefault("TOKEN_FILE", "bot_token_test.json")
+os.environ.setdefault("HEARTBEAT_MODE", "smart")
+
+# Принудительно: тест не должен зависеть от .env родительского проекта,
+# иначе ADMIN_IDS оттуда ломает проверки команд администратора
 os.environ["ADMIN_IDS"] = "admin@example.com"
-os.environ["LOCAL_ADMIN_PASSWORD_FILE"] = "local-admin-test-pw.txt"
-os.environ["WEBUI_AUTH"] = "none"
+os.environ["ADMIN_MODE"] = "strict"
+
+# Адрес администратора, который используют заглушки и ADMIN_IDS.
+# Держим их согласованными: иначе команды отклоняются по правам.
+TEST_ADMIN = "admin@example.com"
+
 FAILED: List[str] = []
 
 
@@ -95,6 +101,8 @@ class StubBot:
         self.authorized_event = asyncio.Event()
         self.stopped_event = asyncio.Event()
         self.sent: List[Dict[str, Any]] = []
+        # Удалённые сообщения: нужно для проверок истории инцидентов
+        self.removed: List[str] = []
         self.fail_send = False
         self._stop = False
         self._connect_task = None
@@ -132,6 +140,7 @@ class StubBot:
         return types.SimpleNamespace(chat_id=chat_id, message_id=f"srv-{len(self.sent)}", timestamp=0)
 
     async def remove_message(self, message_id: str, for_all: bool = False):
+        self.removed.append(message_id)
         return types.SimpleNamespace()
 
     async def start(self) -> None:
@@ -227,7 +236,14 @@ async def main() -> int:
     check(app.VERSION.startswith("12"), "bot_multy импортируется, версия 12.x", app.VERSION)
 
     print("\n2) Инициализация")
+    # Чистые файлы состояния: иначе данные прошлых прогонов
+    # (очередь, реестр доставленного) ломают проверки
+    for stale in ("dl_test.json", "bot_state_test.json",
+                  "bot_outbox_test.json", "bot_token_test.json"):
+        Path(stale).unlink(missing_ok=True)
     await app.init_runtime_for_tests()
+    app._delivered_recent = {}
+    app._delivered_dirty = False
     check(app.state_manager is not None, "StateManager создан")
     check(app.runner is not None, "BotRunner создан")
 
@@ -276,10 +292,10 @@ async def main() -> int:
         bot = app.bot
         bot.sent.clear()
         zabbix_payload = {
-            "subject": "PROBLEM: CPU high on app-01",
+            "subject": "PROBLEM: CPU high on m1-cp-p-log",
             "message": "CPU Used 95",
             "status": "PROBLEM",
-            "host": "app-01",
+            "host": "m1-cp-p-log",
         }
         resp = await client.post("/webhook?channel=unittest", json=zabbix_payload)
         body = await resp.json()
@@ -306,6 +322,10 @@ async def main() -> int:
         check(resp.status == 400, "пустое сообщение → 400", str(resp.status))
 
         print("\n7) Недоставка при обрыве связи")
+        # Реестр доставленного должен быть пуст: иначе сообщение считается
+        # уже отправленным и в очередь не попадёт
+        app._delivered_recent = {}
+        app._delivered_dirty = False
         bot.authorized_event.clear()
         app.WEBHOOK_WAIT_TIMEOUT = 0.5
         resp = await client.post("/webhook?channel=unittest", json=zabbix_payload)

@@ -25,9 +25,15 @@ services:
       STATE_FILE: /app/data/bot_state.json
       TOKEN_FILE: /app/data/bot_token.json
       OUTBOX_FILE: /app/data/bot_outbox.json
+      METRICS_FILE: /app/data/bot_metrics.json
+      DELIVERED_FILE: /app/data/bot_delivered.json
       LOCAL_ADMIN_PASSWORD_FILE: /app/data/local-admin-initial-password.txt
       WEB_SERVER_HOST: 0.0.0.0
       WEB_SERVER_PORT: "8080"
+      # В контейнере systemd нет: перезапуск из панели завершает процесс,
+      # а контейнер поднимается заново благодаря restart: unless-stopped.
+      # Чтобы кнопка появилась, задайте в .env SERVICE_RESTART_ENABLED=true
+      SERVICE_RESTART_MODE: exit
 
     ports:
       # Панель управления и приём вебхуков.

@@ -17,13 +17,46 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 LOG_FORMAT = "%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Часовой пояс меток в логах.
+# В контейнере время обычно UTC, поэтому записи «съезжают» на 3 часа
+# относительно московского. По умолчанию приводим к Москве (UTC+3);
+# переопределяется через LOG_TZ (+3, -5, 0, ...) или LOG_TZ_NAME=UTC.
+LOG_TZ_OFFSET = float(os.getenv("LOG_TZ", "3"))
+_TZ_NAME = os.getenv("LOG_TZ_NAME", "").strip()
+
+
+def _log_timezone() -> timezone:
+    """Часовой пояс для меток времени в логах."""
+    if _TZ_NAME.upper() in {"UTC", "Z", "GMT"}:
+        return timezone.utc
+    return timezone(timedelta(hours=LOG_TZ_OFFSET))
+
+
+class LocalTimeFormatter(logging.Formatter):
+    """
+    Форматтер с метками в нужном часовом поясе.
+
+    Стандартный logging использует время процесса (time.localtime), а в
+    контейнере это UTC — поэтому в логах было на 3 часа меньше, чем на
+    самом деле. Здесь время считается явно от LOG_TZ.
+    """
+
+    def formatTime(self, record, datefmt: Optional[str] = None) -> str:
+        moment = datetime.fromtimestamp(record.created, _log_timezone())
+        if datefmt:
+            return moment.strftime(datefmt)
+        return moment.isoformat(timespec="seconds")
 
 # канал -> имя файла в logs/
 CHANNEL_FILES = {
@@ -52,7 +85,7 @@ _channels: Dict[str, logging.Logger] = {}
 
 
 def _build_formatter() -> logging.Formatter:
-    return logging.Formatter(LOG_FORMAT, DATE_FORMAT)
+    return LocalTimeFormatter(LOG_FORMAT, DATE_FORMAT)
 
 
 def setup_logging(

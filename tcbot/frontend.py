@@ -72,6 +72,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="ua-group ua-group-static"><span class="ua-group-name">Управление</span></div>
         <div class="ua-section">
           <a class="ua-item" href="/channels"><span class="ua-ico">📢</span>Каналы</a>
+          <a class="ua-item" href="/channel-stats"><span class="ua-ico">📊</span>Статистика</a>
+          <a class="ua-item" href="/backups"><span class="ua-ico">💾</span>Резервные копии</a>
           <a class="ua-item" href="/outbox"><span class="ua-ico">📦</span>Очередь</a>
           <a class="ua-item" href="/send"><span class="ua-ico">✉️</span>Отправка</a>
         </div>
@@ -91,6 +93,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
           </button>
           <button type="button" class="ua-item" id="menu-ready">
             <span class="ua-ico">🩺</span>Проверить готовность
+          </button>
+          <button type="button" class="ua-item ua-danger" id="menu-service-restart"
+                  style="display:none;" title="systemctl restart">
+            <span class="ua-ico">🔄</span>Перезапустить службу
           </button>
         </div>
 
@@ -186,22 +192,50 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </span>
   </h2>
 
+  <!-- Показатели: то, что почти всегда статично, показываем цифрами -->
+  <div class="stat-tiles" id="stat-tiles">
+    <div class="stat-tile">
+      <div class="stat-value" id="st-sent">—</div>
+      <div class="stat-label">отправлено</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-value err" id="st-failed">—</div>
+      <div class="stat-label">отказов</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-value ok" id="st-rate">—</div>
+      <div class="stat-label">успешность</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-value" id="st-latency">—</div>
+      <div class="stat-label">ср. задержка</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-value" id="st-queue">—</div>
+      <div class="stat-label">в очереди</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-value ok" id="st-ws">—</div>
+      <div class="stat-label">связь</div>
+    </div>
+  </div>
+
   <div class="charts-grid">
     <div class="chart-box">
-      <div class="chart-title"><span>Отправлено</span><span class="chart-value" id="cv-sent">—</span></div>
+      <div class="chart-title"><span>Отправлено и отказы</span><span class="chart-value" id="cv-sent">—</span></div>
       <canvas id="chart-sent"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title"><span>Задержка доставки</span><span class="chart-value" id="cv-latency">—</span></div>
+      <canvas id="chart-latency"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title"><span>Статусы</span><span class="chart-value" id="cv-statuses">—</span></div>
+      <div class="chart-body"><div id="status-bars" class="hbars"></div></div>
     </div>
     <div class="chart-box">
       <div class="chart-title"><span>Очередь</span><span class="chart-value" id="cv-queue">—</span></div>
       <canvas id="chart-queue"></canvas>
-    </div>
-    <div class="chart-box">
-      <div class="chart-title"><span>Связь</span><span class="chart-value" id="cv-ws">—</span></div>
-      <canvas id="chart-ws"></canvas>
-    </div>
-    <div class="chart-box">
-      <div class="chart-title"><span>Перезапуски</span><span class="chart-value" id="cv-restarts">—</span></div>
-      <canvas id="chart-restarts"></canvas>
     </div>
   </div>
   <div id="charts-empty" class="dim fs-12" style="display:none; padding:8px 0;">

@@ -134,6 +134,37 @@ APP_JS = r"""
       });
     }
 
+    var serviceRestart = $('menu-service-restart');
+    if (serviceRestart) {
+      // Кнопку показываем только когда перезапуск разрешён в настройках
+      api('/api/service/status').then(function (data) {
+        if (data && data.restart_enabled) {
+          serviceRestart.style.display = '';
+          // В контейнере перезапуск идёт через перезапуск самого контейнера
+          serviceRestart.title = data.mode === 'exit'
+            ? 'перезапуск контейнера'
+            : 'systemctl restart ' + (data.service || '');
+        }
+      }).catch(function () { /* сервисное управление недоступно */ });
+
+      serviceRestart.addEventListener('click', function () {
+        menu.classList.remove('is-open');
+        var what = serviceRestart.title;
+        if (!confirm('Перезапустить бота (' + what + ')?\n\nПанель будет недоступна несколько секунд.')) {
+          return;
+        }
+        api('/api/service/restart', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirm: 'restart' })
+        })
+          .then(function () {
+            toast('Служба перезапускается — обновите страницу через 10 секунд');
+          })
+          .catch(function (e) { toast(e.message, true); });
+      });
+    }
+
     var ready = $('menu-ready');
     if (ready) {
       ready.addEventListener('click', function () {
@@ -305,6 +336,34 @@ APP_JS = r"""
     return sortChannels(entries);
   }
 
+  var globalIncidentMode = 'notify';
+
+  /* Подпись режима инцидентов для канала */
+  var INCIDENT_MODE_SHORT = {
+    notify: 'учесть',
+    delete: 'удалить',
+    resolve: 'решено',
+    both: 'удалить + решено'
+  };
+
+  var INCIDENT_MODE_FULL = {
+    notify: 'только учесть',
+    delete: 'удалить проблему',
+    resolve: 'прислать «решено»',
+    both: 'удалить и прислать'
+  };
+
+  function channelModeCell(info) {
+    var own = info.incident_mode;
+    if (own) {
+      return '<span class="ch-mode own" title="Своя настройка канала">' +
+        escapeHtml(INCIDENT_MODE_SHORT[own] || own) + '</span>';
+    }
+    return '<span class="ch-mode inherits" title="Как в общих настройках">' +
+      escapeHtml(INCIDENT_MODE_SHORT[globalIncidentMode] || globalIncidentMode) +
+      '&nbsp;<span class="dim fs-11">↳</span></span>';
+  }
+
   function renderChannels() {
     var entries = filteredChannels();
     var sizeSel = $('ch-page-size');
@@ -340,6 +399,7 @@ APP_JS = r"""
         '</td>' +
         '<td><span class="ch-id" data-copy="' + escapeHtml(chatId) + '" ' +
           'title="Нажмите, чтобы скопировать">' + escapeHtml(short) + '</span></td>' +
+        '<td>' + channelModeCell(info) + '</td>' +
         '<td class="ch-date">' + escapeHtml(String(info.created_at || '').slice(0, 10)) +
           (info.updated_at ? '<div class="dim fs-11">изм. ' +
             escapeHtml(String(info.updated_at).slice(5, 10)) + '</div>' : '') + '</td>' +
@@ -350,7 +410,7 @@ APP_JS = r"""
           '<button class="danger" data-del-channel="' + escapeHtml(name) + '">✕</button>' +
         '</td>' +
         '</tr>';
-    }).join('') : '<tr><td colspan="5"><div class="empty-cell">' +
+    }).join('') : '<tr><td colspan="6"><div class="empty-cell">' +
         (entries.length ? 'нет данных' : 'каналов нет — добавьте первый') + '</div></td></tr>';
 
     var pager = $('ch-pager');
@@ -370,8 +430,18 @@ APP_JS = r"""
   function loadChannels() {
     return api('/api/channels').then(function (data) {
       channelsData = data.channels || {};
+      globalIncidentMode = data.incident_mode || 'notify';
       var def = $('default-chat');
-      if (def) def.textContent = data.default_chat || '-';
+      if (def) def.textContent = data.default_chat || 'не задан';
+
+      var usage = $('dc-usage');
+      if (usage && data.default_chat) {
+        var used = 0;
+        Object.keys(data.channels || {}).forEach(function (name) {
+          if ((data.channels[name] || {}).chat_id === data.default_chat) used++;
+        });
+        usage.textContent = used ? '(' + used + ' канал(ов) ведут сюда)' : '';
+      }
       renderChannels();
     });
   }
@@ -424,6 +494,10 @@ APP_JS = r"""
   function loadSettings() {
     return api('/api/settings').then(function (data) {
       var s = data.settings || {};
+      if ($('set-incident-mode')) {
+        $('set-incident-mode').value = s.incident_mode || 'notify';
+        updateIncidentModeHint();
+      }
       if ($('set-delete')) $('set-delete').value = String(!!s.delete_messages_enabled);
       if ($('set-delete-hours')) $('set-delete-hours').value = s.error_delete_threshold_hours;
       if ($('set-retention')) $('set-retention').value = s.error_history_retention_days;
@@ -533,6 +607,9 @@ APP_JS = r"""
     $('edit-name').value = name;
     $('edit-chat-id').value = info.chat_id || '';
     $('edit-chat-title').value = info.chat_title || '';
+    if ($('edit-incident-mode')) {
+      $('edit-incident-mode').value = info.incident_mode || '';
+    }
     $('ch-edit-form').classList.remove('hidden');
     $('ch-add-form').classList.add('hidden');
     $('edit-name').focus();
@@ -611,6 +688,8 @@ APP_JS = r"""
 
       var payload = { chat_id: chatId, chat_title: title };
       if (newName !== editingChannel) payload.new_name = newName;
+      // Пустая строка = наследовать глобальный режим
+      payload.incident_mode = ($('edit-incident-mode') || {}).value || '';
 
       api('/api/channels/' + encodeURIComponent(editingChannel), {
         method: 'PUT',
@@ -663,6 +742,14 @@ APP_JS = r"""
     return c;
   }
 
+  /* Высота графика берётся из CSS-переменной --chart-h,
+     чтобы канвас и блок статусов были ровно одной высоты. */
+  function chartHeight(fallback) {
+    var raw = cssVar('--chart-h', '').trim();
+    var value = parseInt(raw, 10);
+    return isFinite(value) && value > 0 ? value : (fallback || 110);
+  }
+
   /* Рисует линейный график: без библиотек и CDN. */
   function drawLine(canvas, points, opts) {
     if (!canvas) return;
@@ -671,7 +758,7 @@ APP_JS = r"""
     var dpr = window.devicePixelRatio || 1;
     var rect = canvas.getBoundingClientRect();
     var w = Math.max(120, rect.width || canvas.clientWidth || 300);
-    var h = o.height || 110;
+    var h = o.height || chartHeight(110);
 
     canvas.width = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
@@ -773,11 +860,162 @@ APP_JS = r"""
     ctx.fillText(values[values.length - 1].label || '', w - P.right, h - P.bottom + 5);
   }
 
+  /* Столбчатая диаграмма по каналам: подписи снизу, значения сверху. */
+  /* Столбчатая диаграмма по каналам: столбик делится на проблемы (красное)
+     и решения (зелёное), чтобы видеть не только объём, но и соотношение. */
+  function drawBars(canvas, items, opts) {
+    if (!canvas) return;
+    var o = opts || {};
+    var dpr = window.devicePixelRatio || 1;
+    var rect = canvas.getBoundingClientRect();
+    var w = Math.max(200, rect.width || canvas.clientWidth || 400);
+    var h = o.height || chartHeight(110);
+
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    canvas.style.height = h + 'px';
+
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    var colorText = cssVar('--text-dim', '#8a96a3');
+    var colorPrimary = o.color || cssVar('--aq-primary', '#1f4e8c');
+    var colorProblem = cssVar('--err', '#c62828');
+    var colorResolved = cssVar('--ok', '#2e7d32');
+    var colorGrid = cssVar('--border-light', '#dde3ea');
+
+    var data = (items || []).slice(0, o.limit || 10);
+    if (!data.length) {
+      ctx.fillStyle = colorText;
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(o.emptyText || 'Нет данных за период', w / 2, h / 2);
+      return;
+    }
+
+    var data0 = data;
+    var padTop = 18, padSide = 8;
+    var padBottom = data0.length > 16 ? Math.min(78, 18 + data0.length * 2.4) : 34;
+    var plotH = h - padTop - padBottom;
+
+    // Для раскраски считаем максимум по проблемам и решениям отдельно,
+    // чтобы соотношение было видно при любом объёме
+    var max = Math.max.apply(null, data.map(function (d) { return d.count; }).concat([1]));
+    var slot = (w - padSide * 2) / data.length;
+    var barW = Math.max(6, Math.min(o.barWidth || 46, slot * 0.68));
+
+    // Горизонтальная сетка с подписями количества — без неё не понять масштаб
+    ctx.strokeStyle = colorGrid;
+    ctx.lineWidth = 1;
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = colorText;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+
+    var steps = 4;
+    for (var s = 0; s <= steps; s++) {
+      var level = (max * s) / steps;
+      var gy = padTop + plotH - (level / max) * plotH;
+      ctx.beginPath();
+      ctx.moveTo(padSide, gy);
+      ctx.lineTo(w - padSide, gy);
+      ctx.stroke();
+      ctx.fillText(String(Math.round(level)), padSide + 26, gy);
+    }
+
+    data.forEach(function (item, i) {
+      var hasSplit = (item.problem != null || item.resolved != null);
+      var problem = item.problem || 0;
+      var resolved = item.resolved || 0;
+      var totalForSplit = problem + resolved;
+
+      var bh = Math.max(2, (item.count / max) * plotH);
+      var x = padSide + slot * i + (slot - barW) / 2;
+      var y = padTop + plotH - bh;
+
+      if (hasSplit && totalForSplit > 0) {
+        // Делим столбик: снизу проблемы, сверху решения
+        var hp = Math.round((problem / totalForSplit) * bh);
+        var hr = bh - hp;
+
+        if (hp > 0) {
+          var gradP = ctx.createLinearGradient(0, y + hr, 0, y + bh);
+          gradP.addColorStop(0, colorProblem);
+          gradP.addColorStop(1, hexToRgba(colorProblem, 0.65));
+          ctx.fillStyle = gradP;
+          ctx.beginPath();
+          if (ctx.roundRect) {
+            ctx.roundRect(x, y + hr, barW, bh - hr, hr > 0 ? 0 : 3);
+          } else {
+            ctx.rect(x, y + hr, barW, bh - hr);
+          }
+          ctx.fill();
+        }
+        if (hr > 0) {
+          var gradR = ctx.createLinearGradient(0, y, 0, y + hr);
+          gradR.addColorStop(0, colorResolved);
+          gradR.addColorStop(1, hexToRgba(colorResolved, 0.65));
+          ctx.fillStyle = gradR;
+          ctx.beginPath();
+          if (ctx.roundRect) {
+            ctx.roundRect(x, y, barW, hr, 3);
+          } else {
+            ctx.rect(x, y, barW, hr);
+          }
+          ctx.fill();
+        }
+      } else {
+        var grad = ctx.createLinearGradient(0, y, 0, padTop + plotH);
+        grad.addColorStop(0, colorPrimary);
+        grad.addColorStop(1, hexToRgba(colorPrimary, 0.35));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(x, y, barW, bh, 3) : ctx.rect(x, y, barW, bh);
+        ctx.fill();
+      }
+
+      // Значение над столбиком
+      ctx.fillStyle = colorPrimary;
+      ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(String(item.count), x + barW / 2, y - 2);
+
+      // Подпись канала снизу. При большом числе столбиков поворачиваем —
+      // иначе подписи наезжают друг на друга и читать невозможно.
+      var label = String(item.name || '');
+      var maxChars = data.length > 16 ? 14 : 11;
+      if (label.length > maxChars) label = label.slice(0, maxChars - 1) + '…';
+
+      ctx.fillStyle = colorText;
+      ctx.font = '10px sans-serif';
+      var baseY = padTop + plotH + 6;
+
+      if (data.length > 16) {
+        ctx.save();
+        ctx.translate(x + barW / 2, baseY);
+        ctx.rotate(-Math.PI / 4);
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, 0, 0);
+        ctx.restore();
+      } else {
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(label, x + barW / 2, baseY);
+      }
+    });
+  }
+
   function loadCharts() {
     var hours = ($('charts-hours') || {}).value || 24;
     return api('/api/metrics?kind=history&hours=' + hours).then(function (data) {
       var points = data.points || [];
-      var hasData = points.some(function (p) { return p.sent || p.queued || p.restarts || p.ws; });
+      var hasData = points.some(function (p) {
+        return p.sent || p.failed || p.queued || p.restarts || (p.ws != null);
+      });
 
       var empty = $('charts-empty');
       if (empty) empty.style.display = hasData ? 'none' : '';
@@ -785,16 +1023,73 @@ APP_JS = r"""
       var status = $('charts-status');
       if (status) status.textContent = 'за ' + (data.hours || hours) + ' ч';
 
-      var last = points.length ? points[points.length - 1] : {};
-      if ($('cv-sent')) $('cv-sent').textContent = last.sent || 0;
-      if ($('cv-queue')) $('cv-queue').textContent = last.queued || 0;
-      if ($('cv-ws')) $('cv-ws').textContent = (last.ws == null ? '—' : last.ws + '%');
-      if ($('cv-restarts')) $('cv-restarts').textContent = last.restarts || 0;
+      // --- Показатели цифрами: почти статичные величины не рисуем графиком ---
+      var channels = data.channels || [];
+      var total = channels.reduce(function (sum, c) { return sum + c.count; }, 0);
 
-      drawLine($('chart-sent'), points, { field: 'sent', color: cssVar('--aq-primary', '#1f4e8c') });
-      drawLine($('chart-queue'), points, { field: 'queued', color: cssVar('--warn', '#b26a00') });
-      drawLine($('chart-ws'), points, { field: 'ws', color: cssVar('--ok', '#2e7d32'), formatY: function (v) { return Math.round(v) + '%'; } });
-      drawLine($('chart-restarts'), points, { field: 'restarts', color: cssVar('--err', '#c62828') });
+      var sentTotal = points.reduce(function (s, p) { return s + (p.sent || 0); }, 0);
+      var failedTotal = points.reduce(function (s, p) { return s + (p.failed || 0); }, 0);
+      var attempts = sentTotal + failedTotal;
+      var rate = attempts ? (sentTotal / attempts * 100) : null;
+
+      var latencies = points.filter(function (p) { return p.latency != null; });
+      var avgLatency = latencies.length
+        ? latencies.reduce(function (s, p) { return s + p.latency; }, 0) / latencies.length
+        : null;
+
+      var last = points.length ? points[points.length - 1] : {};
+      var maxQueue = points.reduce(function (m, p) { return Math.max(m, p.queued || 0); }, 0);
+
+      if ($('st-sent')) $('st-sent').textContent = sentTotal;
+      if ($('st-failed')) $('st-failed').textContent = failedTotal;
+      if ($('st-rate')) {
+        $('st-rate').textContent = rate == null ? '—' : rate.toFixed(1) + '%';
+        $('st-rate').className = 'stat-value ' +
+          (rate == null ? '' : (rate >= 99 ? 'ok' : (rate >= 90 ? 'warn' : 'err')));
+      }
+      if ($('st-latency')) {
+        $('st-latency').textContent = avgLatency == null
+          ? '—' : Math.round(avgLatency * 1000) + ' мс';
+      }
+      if ($('st-queue')) {
+        $('st-queue').textContent = maxQueue;
+        $('st-queue').className = 'stat-value ' + (maxQueue > 0 ? 'warn' : 'ok');
+      }
+      if ($('st-ws')) {
+        var wsNow = last.ws;
+        $('st-ws').textContent = wsNow == null ? '—' : wsNow + '%';
+        $('st-ws').className = 'stat-value ' +
+          (wsNow == null ? '' : (wsNow >= 99 ? 'ok' : (wsNow >= 80 ? 'warn' : 'err')));
+      }
+
+      // --- Отправлено и отказы ---
+      if ($('cv-sent')) {
+        $('cv-sent').textContent = sentTotal + (failedTotal ? ' / ' + failedTotal : '');
+      }
+      drawLine($('chart-sent'), points, {
+        field: 'sent', color: cssVar('--aq-primary', '#1f4e8c')
+      });
+
+      // --- Задержка доставки ---
+      if ($('cv-latency')) {
+        $('cv-latency').textContent = avgLatency == null
+          ? '—' : Math.round(avgLatency * 1000) + ' мс';
+      }
+      drawLine($('chart-latency'), points, {
+        field: 'latency',
+        color: cssVar('--warn', '#b26a00'),
+        formatY: function (v) { return Math.round(v * 1000) + 'мс'; },
+        emptyText: 'Нет замеров'
+      });
+
+      // --- Статусы и строгость ---
+      renderStatusBars(data.statuses || []);
+
+      // --- Очередь ---
+      if ($('cv-queue')) $('cv-queue').textContent = maxQueue;
+      drawLine($('chart-queue'), points, {
+        field: 'queued', color: cssVar('--warn', '#b26a00')
+      });
     }).catch(function () { /* графики не критичны */ });
   }
 
@@ -976,6 +1271,743 @@ APP_JS = r"""
     if (awTip) awTip.style.display = 'none';
   }
 
+  // ---------------------------------------------------------------- резервные копии
+
+  var bkItems = [];
+
+  function fmtSize(bytes) {
+    if (!bytes || bytes < 0) return '\u2014';
+    var units = ['Б', 'КБ', 'МБ', 'ГБ'];
+    var n = bytes, i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return n.toFixed(n < 10 && i > 0 ? 1 : 0) + ' ' + units[i];
+  }
+
+  function fmtDateTime(ts) {
+    if (!ts) return '\u2014';
+    var d = new Date(ts * 1000);
+    function pad(v) { return String(v).padStart(2, '0'); }
+    return pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' + d.getFullYear() +
+           ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  function renderBackups(stats, items) {
+    bkItems = items || [];
+
+    var count = $('bk-count');
+    if (count) count.textContent = bkItems.length;
+    if ($('bk-keep') && stats) $('bk-keep').textContent = stats.keep;
+
+    var totals = $('bk-totals');
+    if (totals && stats) {
+      var cells = [
+        { value: stats.count, label: 'копий' },
+        { value: fmtSize(stats.total_size), label: 'всего' },
+        { value: stats.keep, label: 'хранится' },
+        { value: stats.enabled ? 'вкл' : 'выкл', label: 'автокопии',
+          cls: stats.enabled ? 'ok' : 'err' }
+      ];
+      totals.innerHTML = cells.map(function (c) {
+        return '<div class="cs-total">' +
+          '<div class="cs-total-value ' + (c.cls || '') + '">' + c.value + '</div>' +
+          '<div class="cs-total-label">' + c.label + '</div></div>';
+      }).join('');
+    }
+
+    var body = $('bk-rows');
+    if (!body) return;
+
+    if (!bkItems.length) {
+      body.innerHTML = '<tr><td colspan="5"><div class="empty-cell">' +
+        'копий пока нет \u2014 создайте первую кнопкой выше</div></td></tr>';
+      return;
+    }
+
+    body.innerHTML = bkItems.map(function (item) {
+      var content = [];
+      if (item.channels != null) content.push(item.channels + ' каналов');
+      if (item.admins != null) content.push(item.admins + ' админ.');
+      return '<tr>' +
+        '<td><code class="mono fs-12">' + escapeHtml(item.name) + '</code></td>' +
+        '<td class="cs-num">' + fmtSize(item.size) + '</td>' +
+        '<td class="dim fs-12">' + fmtDateTime(item.created_at) + '</td>' +
+        '<td class="dim fs-12">' + (content.join(' \u00b7 ') || '\u2014') + '</td>' +
+        '<td class="actions-cell">' +
+          '<button type="button" class="secondary small" data-restore="' +
+            escapeHtml(item.name) + '">Восстановить</button> ' +
+          '<button type="button" class="secondary small danger" data-delete="' +
+            escapeHtml(item.name) + '">Удалить</button>' +
+        '</td>' +
+        '</tr>';
+    }).join('');
+
+    body.querySelectorAll('[data-restore]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var name = btn.getAttribute('data-restore');
+        if (!confirm('Восстановить состояние из ' + name + '?\n\n' +
+                     'Текущее состояние будет сохранено в отдельную копию. ' +
+                     'После восстановления потребуется перезапуск бота.')) {
+          return;
+        }
+        api('/api/backups/' + encodeURIComponent(name) + '/restore', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirm: 'restore' })
+        })
+          .then(function (result) {
+            toast('Восстановлено: ' + result.channels + ' каналов');
+            loadBackups();
+          })
+          .catch(function (e) { toast(e.message, true); });
+      });
+    });
+
+    body.querySelectorAll('[data-delete]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var name = btn.getAttribute('data-delete');
+        if (!confirm('Удалить копию ' + name + '?')) return;
+        api('/api/backups/' + encodeURIComponent(name), { method: 'DELETE' })
+          .then(function () { toast('Копия удалена'); loadBackups(); })
+          .catch(function (e) { toast(e.message, true); });
+      });
+    });
+  }
+
+  function loadBackups() {
+    return api('/api/backups').then(function (data) {
+      renderBackups(data.stats || {}, data.items || []);
+    }).catch(function (e) {
+      var body = $('bk-rows');
+      if (body) {
+        body.innerHTML = '<tr><td colspan="5"><div class="empty-cell">' +
+          escapeHtml(e.message) + '</div></td></tr>';
+      }
+    });
+  }
+
+  function initBackupHandlers() {
+    on('bk-refresh', 'click', function () {
+      loadBackups().then(function () { toast('Список обновлён'); });
+    });
+    on('bk-create', 'click', function () {
+      api('/api/backups', { method: 'POST' })
+        .then(function (r) {
+          toast('Копия создана: ' + r.file);
+          loadBackups();
+        })
+        .catch(function (e) { toast(e.message, true); });
+    });
+  }
+
+  // ---------------------------------------------------------------- статистика каналов
+
+  var csData = [];
+  var csHours = 24;
+
+  function fmtMs(seconds) {
+    if (seconds == null) return '—';
+    var ms = Math.round(seconds * 1000);
+    return ms < 1000 ? ms + ' мс' : (seconds.toFixed(2) + ' с');
+  }
+
+  function fmtAgo(ts) {
+    if (!ts) return '—';
+    var diff = Math.floor(Date.now() / 1000) - ts;
+    if (diff < 60) return 'только что';
+    if (diff < 3600) return Math.floor(diff / 60) + ' мин назад';
+    if (diff < 86400) return Math.floor(diff / 3600) + ' ч назад';
+    return Math.floor(diff / 86400) + ' дн назад';
+  }
+
+  /* Мини-график канала: столбик делится на проблемы (красное) и
+     решения (зелёное). Сразу видно соотношение, а не только объём. */
+  function csSparkline(hourly, problems, resolved) {
+    var data = hourly || [];
+    if (!data.length) return '';
+
+    var prob = problems || [];
+    var res = resolved || [];
+    var height = 22;
+
+    var totals = data.map(function (v, i) {
+      return (prob[i] || 0) + (res[i] || 0);
+    });
+    var max = Math.max.apply(null, totals.concat([1]));
+
+    var colorProblem = cssVar('--err', '#c62828');
+    var colorResolved = cssVar('--ok', '#2e7d32');
+
+    var bars = data.map(function (v, i) {
+      var p = prob[i] || 0;
+      var r = res[i] || 0;
+      var sum = p + r;
+
+      if (!sum) {
+        return '<i class="cs-seg zero" style="height:2px"></i>';
+      }
+
+      var total_h = Math.max(3, Math.round((sum / max) * height));
+      // Делим высоту пропорционально: проблемы снизу, решения сверху
+      var hp = sum ? Math.round((p / sum) * total_h) : 0;
+      var hr = total_h - hp;
+
+      var tip = 'проблем: ' + p + ', решено: ' + r;
+      var segs = '';
+      if (hp > 0) {
+        segs += '<i class="cs-seg" style="height:' + hp + 'px;background:' +
+          colorProblem + '"></i>';
+      }
+      if (hr > 0) {
+        segs += '<i class="cs-seg" style="height:' + hr + 'px;background:' +
+          colorResolved + '"></i>';
+      }
+      return '<span class="cs-seg-stack" style="height:' + total_h + 'px" title="' +
+        escapeHtml(tip) + '">' + segs + '</span>';
+    }).join('');
+
+    var totalProblem = prob.reduce(function (a, b) { return a + (b || 0); }, 0);
+    var totalResolved = res.reduce(function (a, b) { return a + (b || 0); }, 0);
+
+    // Подпись-итог: перекос видно без наведения
+    var summary = '';
+    if (totalProblem || totalResolved) {
+      summary = '<span class="cs-spark-sum">' +
+        '<b style="color:' + colorProblem + '">' + totalProblem + '</b>/' +
+        '<b style="color:' + colorResolved + '">' + totalResolved + '</b>' +
+        '</span>';
+    }
+
+    return '<div class="cs-spark-row">' +
+      '<div class="cs-spark">' + bars + '</div>' + summary + '</div>';
+  }
+
+  function csRateCell(rate) {
+    if (rate == null) return '<span class="dim">—</span>';
+    var cls = rate >= 99 ? '' : (rate >= 90 ? ' warn' : ' err');
+    return '<div class="cs-rate">' +
+      '<span class="cs-rate-track"><span class="cs-rate-fill' + cls +
+        '" style="width:' + Math.max(2, rate) + '%"></span></span>' +
+      '<span class="cs-rate-text">' + rate.toFixed(1) + '%</span>' +
+      '</div>';
+  }
+
+  function csStatusBadges(statuses) {
+    var list = statuses || [];
+    if (!list.length) return '<span class="dim">—</span>';
+    return '<div class="cs-badges">' + list.slice(0, 4).map(function (s) {
+      var cls = s.name === 'PROBLEM' || s.name === 'FIRING' ? ' problem'
+              : (s.name === 'RESOLVED' || s.name === 'OK' ? ' resolved' : '');
+      return '<span class="cs-badge' + cls + '">' + escapeHtml(s.name) +
+             ' ' + s.count + '</span>';
+    }).join('') + '</div>';
+  }
+
+  function renderChannelStats() {
+    var query = (($('cs-search') || {}).value || '').trim().toLowerCase();
+    var sortBy = (($('cs-sort') || {}).value) || 'total';
+
+    var items = csData.slice();
+    if (query) {
+      items = items.filter(function (c) {
+        return c.name.toLowerCase().indexOf(query) >= 0;
+      });
+    }
+
+    var sorters = {
+      total: function (a, b) { return b.total - a.total; },
+      name: function (a, b) { return a.name.localeCompare(b.name); },
+      failed: function (a, b) { return b.failed - a.failed; },
+      latency: function (a, b) { return (b.avg_latency || 0) - (a.avg_latency || 0); },
+      last: function (a, b) { return (b.last_at || 0) - (a.last_at || 0); }
+    };
+    items.sort(sorters[sortBy] || sorters.total);
+
+    var count = $('cs-count');
+    if (count) count.textContent = items.length;
+    var filtered = $('cs-filtered');
+    if (filtered) filtered.textContent = query ? 'найдено: ' + items.length : '';
+
+    var body = $('cs-rows');
+    if (!body) return;
+
+    body.innerHTML = items.length ? items.map(function (c) {
+      return '<tr>' +
+        '<td><div class="cs-name">' + escapeHtml(c.name) + '</div>' +
+          csSparkline(c.hourly, c.hourly_problem, c.hourly_resolved) + '</td>' +
+        '<td class="cs-num">' + c.sent + '</td>' +
+        '<td class="cs-num' + (c.failed ? ' err' : '') + '">' + (c.failed || '—') + '</td>' +
+        '<td>' + csRateCell(c.success_rate) + '</td>' +
+        '<td class="cs-num fs-12">' + fmtMs(c.avg_latency) +
+          (c.max_latency ? '<div class="dim fs-11">макс ' + fmtMs(c.max_latency) + '</div>' : '') +
+        '</td>' +
+        '<td>' + csStatusBadges(c.statuses) + '</td>' +
+        '<td class="dim fs-12">' + fmtAgo(c.last_at) + '</td>' +
+        '</tr>';
+    }).join('') : '<tr><td colspan="7"><div class="empty-cell">' +
+        (query ? 'ничего не найдено' : 'данных пока нет — уведомления ещё не приходили') +
+        '</div></td></tr>';
+  }
+
+  function renderCsTotals(totals) {
+    var box = $('cs-totals');
+    if (!box || !totals) return;
+    var cells = [
+      { value: totals.channels || 0, label: 'каналов' },
+      { value: totals.sent || 0, label: 'отправлено' },
+      { value: totals.failed || 0, label: 'отказов', cls: totals.failed ? 'err' : '' },
+      { value: totals.success_rate == null ? '—' : totals.success_rate.toFixed(1) + '%',
+        label: 'успешность', cls: 'ok' },
+      { value: fmtMs(totals.avg_latency), label: 'ср. задержка' }
+    ];
+    box.innerHTML = cells.map(function (c) {
+      return '<div class="cs-total">' +
+        '<div class="cs-total-value ' + (c.cls || '') + '">' + c.value + '</div>' +
+        '<div class="cs-total-label">' + c.label + '</div></div>';
+    }).join('');
+  }
+
+  function loadChannelStats() {
+    return api('/api/metrics?kind=channel-report&hours=' + csHours).then(function (data) {
+      csData = data.channels || [];
+      renderCsTotals(data.totals || {});
+      renderChannelStats();
+    }).catch(function (e) {
+      var body = $('cs-rows');
+      if (body) body.innerHTML = '<tr><td colspan="7"><div class="empty-cell">' +
+        escapeHtml(e.message) + '</div></td></tr>';
+    });
+  }
+
+  // ---------------------------------------------------------------- временная шкала
+
+  var TL_COLORS = ['#4c8dff', '#2fb37a', '#e8a33d', '#d9534f', '#8e6cd4',
+                   '#17a2b8', '#c2410c', '#65a30d', '#db2777', '#0891b2',
+                   '#7c3aed', '#059669', '#d97706', '#dc2626', '#2563eb'];
+  var tlPoints = [];
+  var tlBucket = 'auto';
+  var tlBucketMinutes = 5;
+  var tlColors = {};
+  var tlColorSeq = 0;
+  var tlTip = null;
+
+  function tlColor(name) {
+    if (!tlColors[name]) {
+      tlColors[name] = TL_COLORS[tlColorSeq % TL_COLORS.length];
+      tlColorSeq++;
+    }
+    return tlColors[name];
+  }
+
+  /* Рисует точки на шкале времени: размер зависит от числа сообщений. */
+  function drawTimeline(canvas, points, opts) {
+    if (!canvas) return;
+    var o = opts || {};
+    var dpr = window.devicePixelRatio || 1;
+    var rect = canvas.getBoundingClientRect();
+    var w = Math.max(320, rect.width || canvas.clientWidth || 600);
+    var h = o.height || 200;
+
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    canvas.style.height = h + 'px';
+
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    var colorText = cssVar('--text-dim', '#8a96a3');
+    var colorGrid = cssVar('--border-light', '#dde3ea');
+
+    if (!points.length) {
+      ctx.fillStyle = colorText;
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(o.emptyText || 'За период событий не было', w / 2, h / 2);
+      return;
+    }
+
+    var padL = 26, padR = 12, padT = 16, padB = 30;
+    var plotW = w - padL - padR;
+    var plotH = h - padT - padB;
+
+    var t0 = points[0].ts;
+    var t1 = points[points.length - 1].ts;
+    var span = (t1 - t0) || 1;
+    var maxTotal = Math.max.apply(null, points.map(function (p) { return p.total; }));
+
+    function xOf(ts) { return padL + ((ts - t0) / span) * plotW; }
+    // Точки держим у нижней части, чтобы подсказки не уходили за край
+    function yOf(point, index) {
+      var ratio = maxTotal ? point.total / maxTotal : 0;
+      var spread = (index % 3) / 3;
+      return padT + plotH * (1 - ratio * 0.72 - spread * 0.22);
+    }
+    function radiusOf(point) {
+      if (!maxTotal) return 4;
+      var r = 4 + Math.sqrt(point.total / maxTotal) * 13;
+      return Math.min(17, r);
+    }
+
+    // Горизонтальная сетка с подписями количества: без неё непонятен масштаб
+    ctx.strokeStyle = colorGrid;
+    ctx.lineWidth = 1;
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = colorText;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+
+    var gridSteps = 4;
+    for (var gs = 0; gs <= gridSteps; gs++) {
+      var level = (maxTotal * gs) / gridSteps;
+      var gy = padT + plotH - (level / (maxTotal || 1)) * plotH;
+      ctx.beginPath();
+      ctx.moveTo(padL, gy);
+      ctx.lineTo(w - padR, gy);
+      ctx.stroke();
+      if (level > 0) {
+        ctx.fillText(String(Math.round(level)), padL - 2, gy);
+      }
+    }
+
+    // Вертикальная сетка по времени — тоже помогает читать график
+    var vTicks = Math.min(8, points.length);
+    ctx.strokeStyle = hexToRgba(colorGrid, 0.7);
+    for (var vi = 0; vi < vTicks; vi++) {
+      var vIdx = Math.round((points.length - 1) * (vi / Math.max(1, vTicks - 1)));
+      var vx = xOf(points[vIdx].ts);
+      ctx.beginPath();
+      ctx.moveTo(vx, padT);
+      ctx.lineTo(vx, padT + plotH);
+      ctx.stroke();
+    }
+
+    // Ось времени
+    ctx.strokeStyle = colorGrid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, padT + plotH);
+    ctx.lineTo(w - padR, padT + plotH);
+    ctx.stroke();
+
+    ctx.fillStyle = colorText;
+    ctx.font = '10px sans-serif';
+    ctx.textBaseline = 'top';
+
+    var ticks = Math.min(7, points.length);
+    for (var i = 0; i < ticks; i++) {
+      var idx = Math.round((points.length - 1) * (i / Math.max(1, ticks - 1)));
+      var pt = points[idx];
+      var px = xOf(pt.ts);
+      ctx.textAlign = i === 0 ? 'left' : (i === ticks - 1 ? 'right' : 'center');
+      ctx.fillText(pt.time, px, padT + plotH + 8);
+    }
+
+    // Цвета статусов: проблема — красная, решение — зелёное
+    var colorProblem = cssVar('--err', '#c62828');
+    var colorResolved = cssVar('--ok', '#2e7d32');
+
+    // Точки
+    points.forEach(function (point, index) {
+      var x = xOf(point.ts);
+      var y = yOf(point, index);
+      var r = radiusOf(point);
+
+      var problems = point.problems || 0;
+      var resolved = point.resolved || 0;
+
+      // Если в интервале только решения — точка зелёная,
+      // только проблемы — красная, смешанные — красная с зелёной серединой.
+      var hasProblem = problems > 0;
+      var hasResolved = resolved > 0;
+      var mainColor = hasProblem
+        ? colorProblem
+        : (hasResolved ? colorResolved : cssVar('--aq-primary', '#1f4e8c'));
+
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = hexToRgba(mainColor, 0.3);
+      ctx.fill();
+
+      // Смешанный интервал: правая половина — решения, левая — проблемы
+      if (hasProblem && hasResolved) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x, y, Math.max(2.5, r * 0.5), 0, Math.PI * 2);
+        ctx.clip();
+        ctx.fillStyle = colorProblem;
+        ctx.fillRect(x - r, y - r, r, r * 2);
+        ctx.fillStyle = colorResolved;
+        ctx.fillRect(x, y - r, r, r * 2);
+        ctx.restore();
+      } else {
+        ctx.beginPath();
+        ctx.arc(x, y, Math.max(2.5, r * 0.45), 0, Math.PI * 2);
+        ctx.fillStyle = mainColor;
+        ctx.fill();
+      }
+
+      if (point.failed) {
+        ctx.beginPath();
+        ctx.arc(x, y, r + 2.5, 0, Math.PI * 2);
+        ctx.strokeStyle = cssVar('--warn', '#b26a00');
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      point._x = x;
+      point._y = y;
+      point._r = r;
+    });
+
+    tlPoints = points;
+  }
+
+  function tlTipHtml(point) {
+    // Точное время интервала: от начала до конца шага
+    var stepMin = point.bucket_minutes || tlBucketMinutes || 5;
+    var startLabel = point.label;
+    var endDate = new Date(point.ts * 1000 + stepMin * 60000);
+    var pad2 = function (v) { return String(v).padStart(2, '0'); };
+    var endLabel = pad2(endDate.getDate()) + '.' + pad2(endDate.getMonth() + 1) +
+      ' ' + pad2(endDate.getHours()) + ':' + pad2(endDate.getMinutes());
+
+    var html = '<div class="tl-tip-head">' +
+      '<strong>' + escapeHtml(startLabel) + ' – ' + escapeHtml(endLabel.split(' ')[1]) +
+      '</strong>' +
+      (point.weekday ? ' · ' + escapeHtml(point.weekday) : '') +
+      (point.approximate ? ' <span style="opacity:.6">(примерно)</span>' : '') +
+      '<br>интервал ' + stepMin + ' мин, всего <strong>' + point.total + '</strong>' +
+      '</div>';
+
+    // Проблемы и решения отдельными строками
+    var problems = point.problems || 0;
+    var resolved = point.resolved || 0;
+    if (problems || resolved) {
+      html += '<div class="tl-tip-row">' +
+        '<i class="tl-tip-dot" style="background:' +
+          cssVar('--err', '#c62828') + '"></i>' +
+        '<span class="tl-tip-name">проблем</span>' +
+        '<span class="tl-tip-count">' + problems + '</span></div>';
+      html += '<div class="tl-tip-row">' +
+        '<i class="tl-tip-dot" style="background:' +
+          cssVar('--ok', '#2e7d32') + '"></i>' +
+        '<span class="tl-tip-name">решено</span>' +
+        '<span class="tl-tip-count">' + resolved + '</span></div>';
+    }
+
+    // Каналы: если есть разбивка по статусам — показываем «3 / 1»
+    var byChannel = point.by_channel || {};
+    html += '<div class="tl-tip-list" style="margin-top:6px;">' +
+      point.channels.slice(0, 8).map(function (item) {
+        var detail = byChannel[item.name] || {};
+        var extra = '';
+        if (detail.problem != null || detail.resolved != null) {
+          var p = detail.problem || 0;
+          var r2 = detail.resolved || 0;
+          if (p && r2) extra = ' (' + p + ' / ' + r2 + ')';
+        }
+        return '<div class="tl-tip-row">' +
+          '<i class="tl-tip-dot" style="background:' + tlColor(item.name) + '"></i>' +
+          '<span class="tl-tip-name">' + escapeHtml(item.name) + '</span>' +
+          '<span class="tl-tip-count">' + item.count + escapeHtml(extra) + '</span>' +
+          '</div>';
+      }).join('') + '</div>';
+
+    var sev = Object.keys(point.severities || {});
+    if (sev.length) {
+      html += '<div class="tl-tip-head" style="border:0;padding:6px 0 0;margin:6px 0 0;' +
+              'border-top:1px solid var(--border-light);">' +
+              escapeHtml(sev.join(', ')) + '</div>';
+    }
+    return html;
+  }
+
+  function tlShowTip(event) {
+    if (!tlPoints.length) return;
+    var canvas = $('chart-timeline');
+    if (!canvas) return;
+
+    var rect = canvas.getBoundingClientRect();
+    var mx = event.clientX - rect.left;
+    var my = event.clientY - rect.top;
+
+    var best = null;
+    var bestDist = Infinity;
+    tlPoints.forEach(function (point) {
+      if (point._x == null) return;
+      var dx = mx - point._x;
+      var dy = my - point._y;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < Math.max(18, point._r + 6) && dist < bestDist) {
+        bestDist = dist;
+        best = point;
+      }
+    });
+
+    if (!best) { tlHideTip(); return; }
+
+    if (!tlTip) {
+      tlTip = document.createElement('div');
+      tlTip.className = 'tl-tip';
+      document.body.appendChild(tlTip);
+    }
+    tlTip.innerHTML = tlTipHtml(best);
+    tlTip.style.display = 'block';
+
+    var tw = tlTip.offsetWidth, th = tlTip.offsetHeight;
+    var left = Math.max(8, Math.min(event.clientX - tw / 2, window.innerWidth - tw - 8));
+    var topPos = rect.top + best._y - th - 12;
+    if (topPos < 8) topPos = rect.top + best._y + best._r + 12;
+    tlTip.style.left = left + 'px';
+    tlTip.style.top = topPos + 'px';
+
+    canvas.style.cursor = 'pointer';
+  }
+
+  function tlHideTip() {
+    if (tlTip) tlTip.style.display = 'none';
+    var canvas = $('chart-timeline');
+    if (canvas) canvas.style.cursor = 'default';
+  }
+
+  function renderTimelineLegend(points) {
+    var box = $('tl-legend');
+    if (!box) return;
+    var totals = {};
+    points.forEach(function (point) {
+      point.channels.forEach(function (item) {
+        totals[item.name] = (totals[item.name] || 0) + item.count;
+      });
+    });
+    var ordered = Object.keys(totals).sort(function (a, b) {
+      return totals[b] - totals[a];
+    }).slice(0, 10);
+
+    if (!ordered.length) { box.innerHTML = ''; return; }
+
+    // Сначала пояснение цветов статусов — главное на графике
+    var statusLegend =
+      '<span class="tl-item"><i class="tl-dot" style="background:' +
+        cssVar('--err', '#c62828') + '"></i>проблема</span>' +
+      '<span class="tl-item"><i class="tl-dot" style="background:' +
+        cssVar('--ok', '#2e7d32') + '"></i>решено</span>' +
+      '<span class="tl-item" style="opacity:.7;">размер точки — число сообщений</span>';
+
+    box.innerHTML = statusLegend +
+      '<span class="tl-item" style="opacity:.4;margin:0 2px;">|</span>' +
+      ordered.map(function (name) {
+        return '<span class="tl-item">' +
+          '<i class="tl-dot" style="background:' + tlColor(name) +
+            ';width:7px;height:7px;"></i>' +
+          escapeHtml(name) + ' <span style="opacity:.65">' + totals[name] + '</span>' +
+          '</span>';
+      }).join('');
+  }
+
+  function loadTimeline() {
+    var hours = csHours || 24;
+    var bucket = tlBucket || 'auto';
+    return api('/api/metrics?kind=timeline&hours=' + hours + '&bucket=' + bucket)
+      .then(function (data) {
+      var points = data.points || [];
+      if ($('tl-status')) {
+        if (points.length) {
+          var step = data.bucket_minutes;
+          var label = step >= 60
+            ? (step / 60) + ' ч'
+            : step + ' мин';
+          $('tl-status').textContent = points.length + ' точек, шаг ' + label;
+        } else {
+          $('tl-status').textContent = 'нет событий';
+        }
+      }
+      tlBucketMinutes = data.bucket_minutes || 5;
+      drawTimeline($('chart-timeline'), points, {
+        height: 210,
+        bucketMinutes: tlBucketMinutes
+      });
+      renderTimelineLegend(points);
+    }).catch(function () { /* не критично */ });
+  }
+
+  /* Графики на странице статистики: те же данные, отдельные элементы. */
+  function loadStatsCharts() {
+    var hours = csHours || 24;
+    return api('/api/metrics?kind=history&hours=' + hours).then(function (data) {
+      var points = data.points || [];
+
+      var status = $('cs-charts-status');
+      if (status) status.textContent = 'за ' + (data.hours || hours) + ' ч';
+
+      // По каналам — во всю ширину: при 30 каналах нужно место
+      var channels = data.channels || [];
+      var total = channels.reduce(function (sum, c) { return sum + c.count; }, 0);
+      if ($('cv-total')) $('cv-total').textContent = total;
+      drawBars($('chart-channels'), channels, {
+        color: cssVar('--aq-primary', '#1f4e8c'),
+        height: 210,
+        limit: 30,
+        barWidth: 32,
+        emptyText: 'За период ничего не отправлялось'
+      });
+
+      var sentTotal = points.reduce(function (s, p) { return s + (p.sent || 0); }, 0);
+      var failedTotal = points.reduce(function (s, p) { return s + (p.failed || 0); }, 0);
+      if ($('cv-sent-2')) {
+        $('cv-sent-2').textContent = sentTotal + (failedTotal ? ' / ' + failedTotal : '');
+      }
+      drawLine($('chart-sent-2'), points, {
+        field: 'sent', color: cssVar('--aq-primary', '#1f4e8c')
+      });
+
+      var latencies = points.filter(function (p) { return p.latency != null; });
+      var avg = latencies.length
+        ? latencies.reduce(function (s, p) { return s + p.latency; }, 0) / latencies.length
+        : null;
+      if ($('cv-latency-2')) {
+        $('cv-latency-2').textContent = avg == null
+          ? '\u2014' : Math.round(avg * 1000) + ' \u043c\u0441';
+      }
+      drawLine($('chart-latency-2'), points, {
+        field: 'latency',
+        color: cssVar('--warn', '#b26a00'),
+        formatY: function (v) { return Math.round(v * 1000) + '\u043c\u0441'; },
+        emptyText: 'Нет замеров'
+      });
+
+      renderSeverityBars(data.severities || [], 'severity-bars', 'cv-severity');
+      renderStatusBars(data.statuses || [], 'status-bars-2', 'cv-statuses-2');
+    }).catch(function () { /* графики не критичны */ });
+  }
+
+  function initChannelStatsHandlers() {
+    on('tl-bucket', 'change', function () {
+      tlBucket = $('tl-bucket').value || 'auto';
+      loadTimeline();
+    });
+
+    var tlCanvas = $('chart-timeline');
+    if (tlCanvas) {
+      tlCanvas.addEventListener('mousemove', tlShowTip);
+      tlCanvas.addEventListener('mouseleave', tlHideTip);
+      window.addEventListener('scroll', tlHideTip, true);
+    }
+
+    on('cs-hours', 'change', function () {
+      csHours = Number($('cs-hours').value) || 24;
+      loadChannelStats();
+      loadStatsCharts();
+      loadTimeline();
+    });
+    on('cs-refresh', 'click', function () {
+      Promise.all([loadChannelStats(), loadStatsCharts(), loadTimeline()])
+        .then(function () { toast('Статистика обновлена'); });
+    });
+    on('cs-search', 'input', renderChannelStats);
+    on('cs-sort', 'change', renderChannelStats);
+  }
+
   // ---------------------------------------------------------------- диагностика
 
   function fmtTimestamp(ms) {
@@ -1129,11 +2161,34 @@ APP_JS = r"""
     });
   }
 
+  var INCIDENT_MODE_HINTS = {
+    notify: 'Сообщение о проблеме остаётся в чате. При решении бот только отмечает инцидент в истории.',
+    delete: 'При решении сообщение о проблеме удаляется из чата. Новое сообщение не отправляется.',
+    resolve: 'При решении в чат приходит сообщение «✅ Восстановлено». Прежнее сообщение остаётся.',
+    both: 'При решении сообщение о проблеме удаляется И приходит сообщение «✅ Восстановлено».'
+  };
+
+  function updateIncidentModeHint() {
+    var select = $('set-incident-mode');
+    var hint = $('set-mode-hint');
+    if (!select || !hint) return;
+    hint.textContent = INCIDENT_MODE_HINTS[select.value] || '';
+
+    // Режимы с удалением включают удаление автоматически — показываем это
+    var del = $('set-delete');
+    if (del && (select.value === 'delete' || select.value === 'both')) {
+      del.value = 'true';
+    }
+  }
+
   function initSettingsHandlers() {
+    on('set-incident-mode', 'change', updateIncidentModeHint);
+
     on('set-save', 'click', function () {
       api('/api/settings', {
         method: 'POST',
         body: JSON.stringify({
+          incident_mode: ($('set-incident-mode') || {}).value || 'notify',
           delete_messages_enabled: $('set-delete').value === 'true',
           error_delete_threshold_hours: Number($('set-delete-hours').value),
           error_history_retention_days: Number($('set-retention').value),
@@ -1171,6 +2226,127 @@ APP_JS = r"""
         return loadLocalAdmin();
       }).catch(function (e) { toast(e.message, true); });
     });
+  }
+
+  // ---------------------------------------------------------------- чат по умолчанию
+
+  var dcState = { chatId: null, title: null };
+
+  function dcShowForm(show) {
+    var form = $('dc-form');
+    var view = $('dc-view');
+    var btn = $('dc-edit');
+    if (form) form.classList.toggle('hidden', !show);
+    if (view) view.classList.toggle('hidden', show);
+    if (btn) btn.classList.toggle('hidden', show);
+    if (show) {
+      var input = $('dc-chat-id');
+      if (input) {
+        input.value = dcState.chatId || '';
+        input.focus();
+      }
+      var title = $('dc-chat-title');
+      if (title) title.value = dcState.title || '';
+    }
+  }
+
+  function dcHint(text) {
+    var hint = $('dc-hint');
+    if (!hint) return;
+    hint.textContent = text || '';
+    hint.classList.toggle('hidden', !text);
+  }
+
+  function loadDefaultChat() {
+    return api('/api/default-chat').then(function (data) {
+      dcState.chatId = data.chat_id;
+      dcState.options = data.options || [];
+
+      var def = $('default-chat');
+      if (def) def.textContent = data.chat_id || 'не задан';
+
+      var usage = $('dc-usage');
+      if (usage) {
+        usage.textContent = data.channels_using
+          ? '(' + data.channels_using + ' канал(ов) ведут сюда)'
+          : '';
+      }
+
+      // Заполняем список чатов, которые уже используются каналами
+      var select = $('dc-select');
+      if (select) {
+        var current = data.chat_id;
+        var html = '<option value="">— выберите канал —</option>';
+        dcState.options.forEach(function (opt) {
+          var label = opt.channels.length
+            ? opt.channels.join(', ')
+            : (opt.chat_title || 'вне каналов');
+          var title = opt.chat_title ? ' \u2014 ' + opt.chat_title : '';
+          var mark = opt.chat_id === current ? ' \u2713' : '';
+          html += '<option value="' + escapeHtml(opt.chat_id) + '">' +
+            escapeHtml(label) + escapeHtml(title) + escapeHtml(mark) +
+            '</option>';
+        });
+        select.innerHTML = html;
+        if (current) select.value = current;
+      }
+    }).catch(function () { /* не критично */ });
+  }
+
+  function dcSave(chatId, title) {
+    return api('/api/default-chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, chat_title: title || '' })
+    }).then(function (data) {
+      dcState.chatId = data.chat_id;
+      var def = $('default-chat');
+      if (def) def.textContent = data.chat_id || 'не задан';
+      dcShowForm(false);
+      dcHint(chatId ? '' : 'Чат по умолчанию очищен: уведомления без канала будут отклоняться.');
+      toast(chatId ? 'Чат по умолчанию сохранён' : 'Чат по умолчанию очищен');
+      loadDefaultChat();
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  function initDefaultChatHandlers() {
+    on('dc-edit', 'click', function () { dcShowForm(true); });
+
+    on('dc-apply', 'click', function () {
+      var select = $('dc-select');
+      var value = select ? select.value : '';
+      if (!value) {
+        dcHint('Сначала выберите канал в списке');
+        return;
+      }
+      var opt = (dcState.options || []).filter(function (o) {
+        return o.chat_id === value;
+      })[0] || {};
+      dcHint('');
+      dcSave(value, opt.chat_title || '');
+    });
+
+    on('dc-save-manual', 'click', function () {
+      var chatId = (($('dc-chat-id') || {}).value || '').trim();
+      var title = (($('dc-chat-title') || {}).value || '').trim();
+      if (!chatId) {
+        dcHint('Введите chat_id');
+        return;
+      }
+      dcHint('');
+      dcSave(chatId, title);
+    });
+    on('dc-cancel', 'click', function () { dcShowForm(false); dcHint(''); });
+
+    on('dc-clear', 'click', function () {
+      if (!confirm('Очистить чат по умолчанию?\n\n' +
+                   'Уведомления без указания канала перестанут доставляться.')) {
+        return;
+      }
+      dcSave('', '');
+    });
+
+    loadDefaultChat();
   }
 
   function initDiagnosticsHandlers() {
@@ -1215,6 +2391,8 @@ APP_JS = r"""
     if (page === 'admins') return { admins: true };
     if (page === 'local-admin') return { localAdmin: true };
     if (page === 'diagnostics') return { diagnostics: true };
+    if (page === 'channel-stats') return { channelStats: true };
+    if (page === 'backups') return { backups: true };
     return { status: true, logs: true, charts: true, calendar: true };
   }
 
@@ -1283,6 +2461,24 @@ APP_JS = r"""
       if (tasks.admins) {
         initAdminHandlers();
         loadAdmins().catch(function () {});
+      }
+      if (tasks.channels) {
+        initDefaultChatHandlers();
+      }
+      if (tasks.backups) {
+        initBackupHandlers();
+        loadBackups();
+      }
+      if (tasks.channelStats) {
+        initChannelStatsHandlers();
+        loadChannelStats();
+        loadStatsCharts();
+        loadTimeline();
+        setInterval(function () {
+          loadChannelStats();
+          loadStatsCharts();
+          loadTimeline();
+        }, 60000);
       }
       if (tasks.diagnostics) {
         initDiagnosticsHandlers();

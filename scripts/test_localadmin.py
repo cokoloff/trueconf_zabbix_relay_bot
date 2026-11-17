@@ -13,13 +13,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 os.chdir(PROJECT_ROOT)
 
-os.environ["LOG_DIR"] = "logs_la"
-os.environ["STATE_FILE"] = "bs_la.json"
-os.environ["OUTBOX_FILE"] = "ob_la.json"
-os.environ["LOCAL_ADMIN_PASSWORD_FILE"] = "local-admin-test-pw.txt"
-os.environ["ADMIN_MODE"] = "strict"
-os.environ["ADMIN_IDS"] = "admin@example.com"
-os.environ.setdefault("WEBUI_AUTH", "none")
+os.environ.setdefault("LOG_DIR", "logs_la")
+os.environ.setdefault("STATE_FILE", "bs_la.json")
+os.environ.setdefault("OUTBOX_FILE", "ob_la.json")
+os.environ["DELIVERED_FILE"] = "dl_test.json"
+os.environ.setdefault("LOCAL_ADMIN_PASSWORD_FILE", "local-admin-test-pw.txt")
+
 FAILED = []
 
 

@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
+import re
 import signal
 import socket
 import time
@@ -39,6 +41,7 @@ import config
 from tcbot.auth import AuthManager
 from tcbot.localadmin import LocalAdminStore
 from tcbot.logging_setup import get_channel_logger, setup_logging
+from tcbot.backup import BackupManager
 from tcbot.markup import MessageBuilder, plain_text, safe_text
 from tcbot.metrics import MetricsStore
 from tcbot.outbox import Outbox
@@ -100,6 +103,26 @@ METRICS_FILE = cfg("METRICS_FILE", "bot_metrics.json")
 METRICS_INTERVAL = int(cfg("METRICS_INTERVAL", 60))
 METRICS_SAVE_INTERVAL = int(cfg("METRICS_SAVE_INTERVAL", 300))
 
+# Режимы реакции на восстановление инцидента
+INCIDENT_MODES = ("notify", "delete", "resolve", "both")
+
+# Резервное копирование состояния
+BACKUP_ENABLED = bool(cfg("BACKUP_ENABLED", True))
+BACKUP_DIR = cfg("BACKUP_DIR", "backups")
+BACKUP_KEEP = int(cfg("BACKUP_KEEP", 20))
+BACKUP_INTERVAL_HOURS = float(cfg("BACKUP_INTERVAL_HOURS", 24))
+
+# Управление службой из панели (перезапуск)
+SERVICE_RESTART_ENABLED = bool(cfg("SERVICE_RESTART_ENABLED", False))
+SYSTEMD_SERVICE = cfg("SYSTEMD_SERVICE", "trueconf-bot")
+SYSTEMCTL_PATH = cfg("SYSTEMCTL_PATH", "systemctl")
+
+# Режим перезапуска:
+#   systemd — вызвать systemctl restart <служба>
+#   exit    — завершить процесс, контейнер поднимет restart: unless-stopped
+#   auto    — exit внутри контейнера, иначе systemd
+SERVICE_RESTART_MODE = cfg("SERVICE_RESTART_MODE", "auto").strip().lower()
+
 # Очередь недоставленных уведомлений (переживает недоступность сервера и перезапуск)
 OUTBOX_ENABLED = bool(cfg("OUTBOX_ENABLED", True))
 OUTBOX_FILE = cfg("OUTBOX_FILE", "bot_outbox.json")
@@ -148,7 +171,9 @@ SSO_CONFIG = {
 auth_manager: Optional[AuthManager] = None
 sdk_inspector: Optional[SdkInspector] = None
 metrics: Optional[MetricsStore] = None
+backup_manager: Optional[BackupManager] = None
 _metrics_task: Optional[asyncio.Task] = None
+_backup_task: Optional[asyncio.Task] = None
 
 # ============================================================================
 # ЛОГИРОВАНИЕ
@@ -187,6 +212,100 @@ web_port_actual: Optional[int] = None
 
 _processed_commands: "List[str]" = []
 _PROCESSED_LIMIT = 200
+
+# ---------------------------------------------------------------------------
+# Защита от дублей доставки.
+#
+# Почему она нужна:
+#   1. send_message уходит на сервер, но подтверждение не приходит вовремя
+#      (таймаут SEND_TIMEOUT) — бот считает, что не доставлено, и кладёт
+#      сообщение в очередь, хотя в чате оно уже есть;
+#   2. Zabbix повторяет вебхук и сообщение доставляется вторым путём;
+#   3. при рестарте сервиса flush_outbox отправляет экземпляр из очереди —
+#      в чате появляется дубль.
+#
+# Реестр доставленного хранится в файле (по умолчанию bot_delivered.json),
+# иначе после перезапуска он пуст и защита не работает — а именно на рестарте
+# дубли и появляются чаще всего.
+# ---------------------------------------------------------------------------
+_delivered_recent: "Dict[str, float]" = {}
+_DELIVERED_TTL = float(cfg("DELIVERED_DEDUP_WINDOW", 900))   # 15 минут
+_DELIVERED_LIMIT = 2000
+_DELIVERED_FILE = Path(cfg("DELIVERED_FILE", "bot_delivered.json"))
+_delivered_dirty = False
+
+
+def delivery_key(chat_id: str, text: str) -> str:
+    """Ключ доставки: чат + текст сообщения."""
+    return hashlib.sha1(f"{chat_id}\x00{text}".encode("utf-8", "ignore")).hexdigest()
+
+
+def _load_delivered() -> None:
+    """Читает реестр доставленного с диска."""
+    global _delivered_recent
+    if not _DELIVERED_FILE.exists():
+        return
+    try:
+        data = json.loads(_DELIVERED_FILE.read_text(encoding="utf-8"))
+        now = time.time()
+        _delivered_recent = {
+            str(key): float(ts)
+            for key, ts in (data.get("delivered") or {}).items()
+            if now - float(ts) <= _DELIVERED_TTL
+        }
+        if _delivered_recent:
+            logger.info(
+                f"↩️ Реестр доставленного загружен: {len(_delivered_recent)} записей"
+            )
+    except Exception as exc:
+        logger.warning(f"⚠️ Не удалось прочитать {_DELIVERED_FILE}: {exc}")
+        _delivered_recent = {}
+
+
+def _save_delivered() -> None:
+    """Сохраняет реестр доставленного на диск."""
+    global _delivered_dirty
+    if not _delivered_dirty:
+        return
+    try:
+        payload = {"delivered": _delivered_recent}
+        tmp = _DELIVERED_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(_DELIVERED_FILE)
+        _delivered_dirty = False
+    except Exception as exc:
+        logger.warning(f"⚠️ Не удалось сохранить {_DELIVERED_FILE}: {exc}")
+
+
+def was_delivered_recently(chat_id: str, text: str) -> bool:
+    """Проверяет, не отправляли ли это сообщение недавно."""
+    key = delivery_key(chat_id, text)
+    now = time.time()
+    stamp = _delivered_recent.get(key)
+    if stamp is None:
+        return False
+    if now - stamp > _DELIVERED_TTL:
+        _delivered_recent.pop(key, None)
+        return False
+    return True
+
+
+def mark_delivered(chat_id: str, text: str) -> None:
+    """Запоминает факт доставки, чтобы не отправить повторно."""
+    global _delivered_dirty
+    now = time.time()
+    _delivered_recent[delivery_key(chat_id, text)] = now
+    _delivered_dirty = True
+
+    # Чистим просроченные и ограничиваем размер
+    if len(_delivered_recent) > _DELIVERED_LIMIT:
+        cutoff = now - _DELIVERED_TTL
+        for key in [k for k, ts in _delivered_recent.items() if ts < cutoff]:
+            _delivered_recent.pop(key, None)
+        while len(_delivered_recent) > _DELIVERED_LIMIT:
+            _delivered_recent.pop(next(iter(_delivered_recent)))
+
+    _save_delivered()
 
 
 # ============================================================================
@@ -252,16 +371,28 @@ async def deliver_message(
     chat_id: str,
     text: str,
     channel: Optional[str] = None,
-) -> Tuple[bool, Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Отправляет текст в чат: ожидание готовности, разбиение длинных сообщений,
-    повторы, таймаут. Возвращает (успех, ошибка).
+    повторы, таймаут.
+
+    Возвращает (успех, ошибка, message_id). Идентификатор нужен, чтобы
+    потом удалить сообщение о проблеме при её решении.
     """
+    # Защита от дублей: если это сообщение уже ушло недавно (повторный вебхук
+    # от Zabbix, рестарт между отправкой и подтверждением), не шлём снова.
+    if was_delivered_recently(chat_id, text):
+        webhook_log.info(
+            f"↩️ Повторно не отправляю в {shorten(chat_id)}: сообщение уже доставлено "
+            f"(окно {_DELIVERED_TTL:.0f}с)"
+        )
+        return True, None, None
+
     if not await wait_until_ready():
-        return False, "бот не авторизован на сервере"
+        return False, "бот не авторизован на сервере", None
 
     if bot is None:
-        return False, "SDK-бот ещё не создан"
+        return False, "SDK-бот ещё не создан", None
 
     retries = int(state_manager.settings.get("max_retries", MAX_RETRIES) or 0)
     attempts = max(1, retries)
@@ -269,11 +400,15 @@ async def deliver_message(
     chunks = safe_split_text(text, limit=limit) or [text]
     last_error: Optional[str] = None
 
+    first_message_id: Optional[str] = None
+
     for index, chunk in enumerate(chunks, start=1):
         delivered = False
         for attempt in range(1, attempts + 1):
             try:
-                await send_html(chat_id, chunk)
+                sent_id = await send_html(chat_id, chunk)
+                if first_message_id is None:
+                    first_message_id = sent_id
                 delivered = True
                 break
             except TextMessageTooLongError as exc:
@@ -321,38 +456,45 @@ async def deliver_message(
         if not delivered:
             if state_manager is not None:
                 await state_manager.increment("messages_failed")
-            return False, last_error or "неизвестная ошибка отправки"
+            return False, last_error or "неизвестная ошибка отправки", None
 
 
+
+    mark_delivered(chat_id, text)
 
     if state_manager is not None:
         await state_manager.increment("messages_sent")
-    return True, None
+    return True, None, first_message_id
 
 
-async def send_html(chat_id: str, text: str) -> None:
+async def send_html(chat_id: str, text: str) -> Optional[str]:
     """
     Отправляет сообщение с HTML-разметкой (поддерживается TrueConf полностью).
 
     Если сервер отклонит разметку, повторяем обычным текстом — уведомление
     важнее оформления.
+
+    Возвращает message_id отправленного сообщения: он нужен, чтобы удалить
+    сообщение о проблеме, когда она решится.
     """
     try:
-        await asyncio.wait_for(
+        response = await asyncio.wait_for(
             bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML),
             timeout=SEND_TIMEOUT,
         )
     except ApiErrorException as exc:
         logger.warning(f"⚠️ HTML отклонён сервером ({exc}); отправка обычным текстом")
-        await asyncio.wait_for(
+        response = await asyncio.wait_for(
             bot.send_message(chat_id=chat_id, text=plain_text(text), parse_mode=ParseMode.TEXT),
             timeout=SEND_TIMEOUT,
         )
 
+    return getattr(response, "message_id", None)
 
-async def _send_once(chat_id: str, chunk: str) -> None:
+
+async def _send_once(chat_id: str, chunk: str) -> Optional[str]:
     """Одна попытка отправки без повторов (повторы делает вызывающий код)."""
-    await send_html(chat_id, chunk)
+    return await send_html(chat_id, chunk)
 
 
 async def flush_outbox() -> int:
@@ -371,6 +513,17 @@ async def flush_outbox() -> int:
         if item is None:
             break
 
+        # Сообщение могло уйти другим путём, пока лежало в очереди
+        # (повторный вебхук, ручная отправка, доставка до перезапуска).
+        # Тогда не отправляем его второй раз.
+        if was_delivered_recently(item.chat_id, item.text):
+            await outbox.mark_sent(item)
+            webhook_log.info(
+                f"↩️ Из очереди пропущено: канал '{item.channel or '—'}' — "
+                f"уже доставлено ранее"
+            )
+            continue
+
         limit = message_max_length()
         chunks = safe_split_text(item.text, limit=limit) or [item.text]
         try:
@@ -384,9 +537,19 @@ async def flush_outbox() -> int:
             await outbox.requeue_front(item)
             break
 
+        mark_delivered(item.chat_id, item.text)
         await outbox.mark_sent(item)
         delivered += 1
         age_hours = item.age_hours()
+        if metrics is not None:
+            # Доставка из очереди — тоже отправка в канал
+            metrics.record_delivery(
+                channel=item.channel,
+                status=item.status,
+                latency=age_hours * 3600,
+                success=True,
+                severity=getattr(item, "severity", None),
+            )
         webhook_log.info(
             f"📤 Из очереди доставлено: канал '{item.channel or '—'}' "
             f"(ожидало {age_hours * 60:.0f} мин)"
@@ -955,6 +1118,119 @@ def _first(data: Dict[str, Any], *keys: str) -> Optional[str]:
     return None
 
 
+# Признаки статуса в тексте уведомления.
+# Zabbix часто не передаёт поле status, но пишет состояние прямо в теме:
+# «❌ Проблема …» / «✅ Решено …». Без этого разбор статусов оставался пустым.
+_RESOLVED_MARKERS = (
+    "✅ решено", "решено", "восстановлен", "resolved", "recovery",
+    "ok:", "okay", "нормализован", "устранено",
+)
+_PROBLEM_MARKERS = (
+    "❌ проблема", "проблема", "problem", "firing", "alert", "авария",
+    "сработал", "critical", "ошибка", "недоступен",
+)
+
+# Строгость Zabbix приходит в тексте строкой «Строгость: Average ⚡».
+# Это отдельная характеристика: она не заменяет статус, а уточняет его —
+# PROBLEM может быть Information, а может быть Disaster.
+SEVERITY_ALIASES = {
+    "disaster": "Disaster",
+    "high": "High",
+    "average": "Average",
+    "warning": "Warning",
+    "information": "Information",
+    "info": "Information",
+    "not classified": "Not classified",
+    "not_classified": "Not classified",
+    "unknown": "Not classified",
+}
+
+# Порядок от тяжёлого к лёгкому — для сортировки и наглядности
+SEVERITY_ORDER = (
+    "Disaster", "High", "Average", "Warning", "Information", "Not classified",
+)
+
+_SEVERITY_RE = re.compile(
+    r"Строгость\s*[:\-]\s*([A-Za-zА-Яа-я ]+)",
+    re.IGNORECASE,
+)
+
+
+def guess_severity(text: str) -> str:
+    """
+    Извлекает строгость Zabbix из текста уведомления.
+
+    В сообщениях Zabbix есть строка «Строгость: Average ⚡» — это важная
+    характеристика аварии, независимая от статуса. Возвращает каноническое
+    название («Disaster», «High», «Average», «Warning», «Information»)
+    или пустую строку.
+    """
+    raw = str(text or "")
+    if not raw:
+        return ""
+
+    match = _SEVERITY_RE.search(raw)
+    if not match:
+        # Бывает, что строгость передана без слова «Строгость»
+        return ""
+
+    name = match.group(1).strip().lower()
+    return SEVERITY_ALIASES.get(name, "")
+
+
+def guess_status(text: str) -> str:
+    """
+    Определяет статус уведомления по его тексту.
+
+    Нужен, когда отправитель не передал поле status (типично для Zabbix
+    с шаблоном сообщения). Возвращает PROBLEM, RESOLVED или пустую строку.
+    """
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return ""
+
+    # Сначала «решено»: слово «проблема» может встречаться и в нём
+    for marker in _RESOLVED_MARKERS:
+        if lowered.startswith(marker) or f" {marker}" in lowered[:80]:
+            return "RESOLVED"
+
+    for marker in _PROBLEM_MARKERS:
+        if lowered.startswith(marker) or f" {marker}" in lowered[:80]:
+            return "PROBLEM"
+
+    return ""
+
+
+
+_STATUS_MARK_PREFIXES = (
+    "❌ проблема", "✅ решено", "⚠️ проблема", "🔥 проблема", "💀 проблема",
+    "проблема", "решено", "resolved", "problem", "firing", "recovery", "ok",
+)
+
+
+def _strip_status_marks(text: str) -> str:
+    """
+    Убирает из темы признаки статуса, чтобы PROBLEM и RESOLVED дали один ключ.
+
+    «❌ Проблема GRE-R201-FW-FI» и «✅ Решено GRE-R201-FW-FI»
+    превращаются в «GRE-R201-FW-FI» — тогда инцидент находится по обоим.
+    """
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    changed = True
+    while changed:
+        changed = False
+        lowered = value.lower()
+        for prefix in _STATUS_MARK_PREFIXES:
+            if lowered.startswith(prefix):
+                value = value[len(prefix):].lstrip(" :-—–\t")
+                changed = True
+                break
+    return value.strip()
+
+
 def parse_alert(data: Dict[str, Any], query_channel: Optional[str]) -> Dict[str, Any]:
     """Извлекает из тела вебхука канал, статус, ключ инцидента и текст."""
     subject = _first(data, "subject", "Subject", "SUBJECT", "trigger", "Trigger", "title", "Title") or ""
@@ -975,9 +1251,50 @@ def parse_alert(data: Dict[str, Any], query_channel: Optional[str]) -> Dict[str,
     else:
         final_message = message or ""
 
+    # Поле status есть не всегда: Zabbix часто кодирует состояние в теме
+    # («❌ Проблема …» / «✅ Решено …»). Без этого разбор статусов пуст,
+    # а история инцидентов не удаляет сообщения о восстановлении.
+    if not status:
+        status = guess_status(final_message)
+
+    # Строгость Zabbix («Строгость: Average ⚡») — отдельная характеристика:
+    # уточняет серьёзность, не заменяя статус.
+    severity = (
+        _first(data, "severity", "Severity", "priority", "Priority") or ""
+    ).strip()
+    if not severity:
+        severity = guess_severity(final_message)
+
     channel = query_channel or _first(data, "channel", "Channel", "CHANNEL")
     host = _first(data, "host", "Host", "hostname") or ""
-    key_source = f"{host}|{subject}|{message or ''}"
+
+    # Ключ инцидента. Главное — чтобы PROBLEM и RESOLVED давали ОДИН ключ,
+    # иначе сообщение о проблеме не найти и не удалить.
+    #
+    # Zabbix присылает event_id у PROBLEM и recovery-событие у RESOLVED — они
+    # разные, поэтому eventid не годится как общий ключ. Надёжнее всего
+    # triggerid (он один и тот же на весь инцидент) либо имя триггера.
+    trigger_id = str(
+        _first(data, "triggerid", "trigger_id", "TriggerID", "triggerId") or ""
+    ).strip()
+    trigger_name = str(
+        _first(data, "triggername", "trigger_name", "TriggerName",
+               "eventname", "event_name", "alertname") or ""
+    ).strip()
+
+    # Тема без признака статуса: «❌ Проблема X» и «✅ Решено X» → «X»
+    base_subject = _strip_status_marks(subject or "")
+
+    if trigger_id:
+        key_source = f"trigger|{trigger_id}"
+    elif trigger_name:
+        key_source = f"name|{trigger_name}"
+    elif base_subject:
+        key_source = f"subject|{host}|{base_subject}"
+    else:
+        # Последний вариант: первые строки текста без признаков статуса
+        key_source = f"text|{host}|{_strip_status_marks(message or '')[:200]}"
+
     incident_key = hashlib.sha1(key_source.encode("utf-8", "ignore")).hexdigest()[:24]
 
     return {
@@ -985,6 +1302,7 @@ def parse_alert(data: Dict[str, Any], query_channel: Optional[str]) -> Dict[str,
         "subject": subject,
         "message": message,
         "status": status,
+        "severity": severity,
         "final_message": final_message,
         "incident_key": incident_key,
         "host": host,
@@ -995,6 +1313,9 @@ def parse_alert(data: Dict[str, Any], query_channel: Optional[str]) -> Dict[str,
 
 async def handle_webhook(request: web.Request) -> web.Response:
     started = time.perf_counter()
+    # Флаг «сообщение уже ушло в чат»: после него ответ всегда 200,
+    # иначе отправитель повторит запрос и создаст дубль
+    delivered = False
     webhook_log.info(f"📩 Получен вебхук от {request.remote or '—'}")
 
     try:
@@ -1039,7 +1360,7 @@ async def handle_webhook(request: web.Request) -> web.Response:
         webhook_log.info(f"   Триггер: {(alert['subject'] or alert['final_message'])[:120]}")
         webhook_log.info(f"   📢 Канал: '{channel}'")
 
-        ok, error = await deliver_message(target_chat_id, text, channel)
+        ok, error, message_id = await deliver_message(target_chat_id, text, channel)
         elapsed = time.perf_counter() - started
 
         if not ok:
@@ -1053,8 +1374,23 @@ async def handle_webhook(request: web.Request) -> web.Response:
                 incident_key=alert["incident_key"],
                 status=alert["status"],
                 collapse=OUTBOX_COLLAPSE,
+                severity=alert.get("severity"),
             )
             if queued is not None:
+                if metrics is not None:
+                    try:
+                        metrics.record_delivery(
+                            channel=channel,
+                            status=alert.get("status"),
+                            latency=elapsed,
+                            success=False,
+                            severity=alert.get("severity"),
+                        )
+                    except Exception as exc:
+                        error_log.error(
+                            f"❌ Не удалось учесть метрику недоставки: {exc}",
+                            exc_info=exc,
+                        )
                 webhook_log.warning(
                     f"   📦 Не доставлено за {elapsed:.3f}с ({error}); "
                     f"поставлено в очередь ({len(outbox)} в ожидании)"
@@ -1077,25 +1413,82 @@ async def handle_webhook(request: web.Request) -> web.Response:
             )
 
         await state_manager.increment("webhooks_received")
+
+        # Учёт метрик — вспомогательная операция. Если он упадёт, вебхук
+        # всё равно должен ответить 200: сообщение УЖЕ доставлено, а код
+        # ошибки заставит Zabbix повторить запрос и продублировать его в чате.
         if metrics is not None:
-            metrics.record_channel_event(channel)
+            try:
+                metrics.record_delivery(
+                    channel=channel,
+                    status=alert.get("status"),
+                    latency=elapsed,
+                    success=True,
+                    severity=alert.get("severity"),
+                )
+            except Exception as exc:
+                error_log.error(
+                    f"❌ Не удалось учесть метрику доставки: {type(exc).__name__}: {exc}",
+                    exc_info=exc,
+                )
+
         webhook_log.info(f"   ✅ Уведомление отправлено за {elapsed:.3f}с")
 
-        await _track_incident(alert, target_chat_id, channel)
+        # Сообщение доставлено — дальше идут вспомогательные операции.
+        # Любая их ошибка НЕ должна менять ответ на 500: Zabbix повторит
+        # запрос, и уведомление уйдёт в чат ещё раз.
+        delivered = True
+
+        try:
+            await _track_incident(alert, target_chat_id, channel, message_id)
+        except Exception as exc:
+            error_log.error(
+                f"❌ Не удалось обновить историю инцидентов: {type(exc).__name__}: {exc}",
+                exc_info=exc,
+            )
 
         # Связь есть — заодно подтолкнём очередь, не дожидаясь фонового таймера
-        if outbox is not None and len(outbox) > 0:
-            asyncio.create_task(flush_outbox())
+        try:
+            if outbox is not None and len(outbox) > 0:
+                asyncio.create_task(flush_outbox())
+        except Exception as exc:
+            error_log.error(f"❌ Не удалось запустить выгрузку очереди: {exc}")
 
         return web.json_response({"status": "ok", "channel": channel, "elapsed_ms": round(elapsed * 1000)})
 
     except Exception as exc:
+        # Если сообщение уже доставлено, отвечаем 200: повтор запроса
+        # отправителем создаст дубль в чате.
+        if delivered:
+            error_log.error(
+                f"⚠️ Ошибка после успешной доставки (ответ 200): "
+                f"{type(exc).__name__}: {exc}",
+                exc_info=exc,
+            )
+            return web.json_response(
+                {"status": "ok", "note": "доставлено, но с ошибкой учёта"},
+                status=200,
+            )
         error_log.error(f"❌ Ошибка обработки вебхука: {exc}", exc_info=exc)
         return web.json_response({"error": str(exc)}, status=500)
 
 
-async def _track_incident(alert: Dict[str, Any], chat_id: str, channel: Optional[str]) -> None:
-    """История инцидентов: запоминаем проблему, при решении — удаляем сообщение."""
+async def _track_incident(
+    alert: Dict[str, Any],
+    chat_id: str,
+    channel: Optional[str],
+    message_id: Optional[str] = None,
+) -> None:
+    """
+    История инцидентов и действия при восстановлении.
+
+    Режимы (настройка incident_mode в панели):
+
+        delete    — при решении удалить сообщение о проблеме
+        resolve   — при решении отправить сообщение «восстановлено»
+        both      — и удалить, и отправить сообщение
+        notify    — ничего не делать (только записать в историю)
+    """
     status = alert.get("status") or ""
     key = alert["incident_key"]
 
@@ -1105,21 +1498,95 @@ async def _track_incident(alert: Dict[str, Any], chat_id: str, channel: Optional
     if not (is_resolved or is_problem):
         return
 
+    settings = state_manager.settings
+    global_mode = str(settings.get("incident_mode", "notify") or "notify").lower()
+
+    # Режим канала важнее глобального: у одного канала можно удалять
+    # сообщения, у другого — присылать «восстановлено».
+    channel_mode = state_manager.channel_incident_mode(channel)
+    mode = channel_mode or global_mode
+
     if is_problem:
         history_log.info(f"🆘 Ошибка сохранена: {key}")
-        await state_manager.remember_error(key, "", channel)
+        await state_manager.remember_error(key, message_id or "", channel)
+
+        # Сохраняем сразу: иначе при аварийной остановке (kill -9, OOM)
+        # запись об инциденте потеряется вместе с message_id, и удалить
+        # сообщение при восстановлении будет невозможно.
+        try:
+            await state_manager.save()
+        except Exception as exc:
+            error_log.warning(f"⚠️ Не удалось сохранить историю инцидента: {exc}")
+        return
+
+    if mode == "notify":
+        await state_manager.pop_error(key)
+        history_log.info(f"✅ Ошибка отмечена как решенная: {key} (режим: только учёт)")
         return
 
     record = await state_manager.pop_error(key)
     if not record:
-        history_log.info(f"✅ Ошибка отмечена как решенная: {key}")
+        # Инцидент не найден: обычно ключ не совпал или бот перезапускался
+        history_log.info(
+            f"✅ Ошибка отмечена как решенная: {key} "
+            f"(запись об открытии не найдена)"
+        )
+        if mode in {"resolve", "both"}:
+            await _send_resolution_message(alert, chat_id, channel)
         return
 
-    message_id = record.get("message_id")
-    settings = state_manager.settings
-    if not settings.get("delete_messages_enabled") or not message_id:
+    # Собираем ВСЕ сообщения инцидента: Zabbix повторяет PROBLEM,
+    # и каждое повторение создаёт новое сообщение в чате.
+    stored_ids: List[str] = []
+    for candidate in (record.get("message_ids") or []):
+        if candidate and candidate not in stored_ids:
+            stored_ids.append(candidate)
+    single_id = record.get("message_id")
+    if single_id and single_id not in stored_ids:
+        stored_ids.append(single_id)
+    if message_id and message_id not in stored_ids:
+        stored_ids.append(message_id)
+
+    deleted = False
+    if mode in {"delete", "both"}:
+        deleted = await _delete_incident_message(
+            key, stored_ids, record, settings
+        )
+
+    if mode in {"resolve", "both"}:
+        await _send_resolution_message(alert, chat_id, channel)
+
+    if not deleted and mode in {"delete", "both"}:
         history_log.info(f"✅ Ошибка отмечена как решенная: {key}")
-        return
+    else:
+        history_log.info(f"✅ Ошибка отмечена как решенная: {key}")
+
+
+async def _delete_incident_message(
+    key: str,
+    message_ids: List[str],
+    record: Dict[str, Any],
+    settings: Dict[str, Any],
+) -> bool:
+    """
+    Удаляет сообщения инцидента. Возвращает True, если удалено хоть одно.
+
+    Принимает список: Zabbix повторяет PROBLEM, и в чате накапливается
+    несколько сообщений об одной проблеме — удалять нужно все.
+    """
+    if not settings.get("delete_messages_enabled", False):
+        history_log.info(
+            f"ℹ️ Ошибка {key}: удаление выключено в настройках — сообщения оставлены"
+        )
+        return False
+
+    if not message_ids:
+        history_log.warning(
+            f"⚠️ Ошибка {key}: message_id неизвестен — сообщения не удалить. "
+            f"Так бывает, если проблема пришла до обновления бота "
+            f"или доставлена из очереди."
+        )
+        return False
 
     try:
         opened = datetime.fromisoformat(record.get("opened_at", ""))
@@ -1129,19 +1596,59 @@ async def _track_incident(alert: Dict[str, Any], chat_id: str, channel: Optional
 
     threshold = float(settings.get("error_delete_threshold_hours", 24) or 24)
     if age_hours > threshold:
-        history_log.info(f"🕒 Ошибка {key}: возраст {age_hours:.1f}ч > порога {threshold}ч — сообщение оставляем")
-        return
+        history_log.info(
+            f"🕒 Ошибка {key}: возраст {age_hours:.1f}ч > порога {threshold}ч — "
+            f"сообщение оставляем"
+        )
+        return False
 
     if bot is None:
         history_log.warning(f"⚠️ Ошибка {key}: SDK-бот недоступен, сообщение не удалено")
-        return
+        return False
 
-    delete_log.info(f"🗑️ Запрос на удаление {shorten(message_id)} (ключ: {key[:32]})")
-    try:
-        await asyncio.wait_for(bot.remove_message(message_id, for_all=True), timeout=SEND_TIMEOUT)
-        delete_log.info(f"✅ Сообщение {shorten(message_id)} удалено")
-    except Exception as exc:
-        delete_log.warning(f"⚠️ Не удалось удалить {shorten(message_id)}: {type(exc).__name__}: {exc}")
+    if len(message_ids) > 1:
+        history_log.info(
+            f"🧹 Ошибка {key}: повторных сообщений {len(message_ids)} — удаляю все"
+        )
+
+    deleted_any = False
+    for mid in message_ids:
+        delete_log.info(f"🗑️ Запрос на удаление {shorten(mid)} (ключ: {key[:32]})")
+        try:
+            await asyncio.wait_for(
+                bot.remove_message(mid, for_all=True), timeout=SEND_TIMEOUT
+            )
+            delete_log.info(f"✅ Сообщение {shorten(mid)} удалено")
+            deleted_any = True
+        except Exception as exc:
+            # Часть сообщений могла быть уже удалена вручную — это не ошибка
+            delete_log.warning(
+                f"⚠️ Не удалось удалить {shorten(mid)}: {type(exc).__name__}: {exc}"
+            )
+
+    return deleted_any
+
+
+async def _send_resolution_message(
+    alert: Dict[str, Any],
+    chat_id: str,
+    channel: Optional[str],
+) -> None:
+    """Отправляет сообщение о восстановлении в тот же чат."""
+    subject = _strip_status_marks(alert.get("subject") or "") or "Инцидент"
+    icon = get_channel_icon(channel) if channel else ""
+
+    lines = [f"{icon} ✅ <b>Восстановлено:</b> {safe_text(subject)}".strip()]
+    severity = alert.get("severity")
+    if severity:
+        lines.append(f"Строгость: {safe_text(severity)}")
+
+    text = "<br>".join(lines)
+    ok, error, _ = await deliver_message(chat_id, text, channel)
+    if ok:
+        history_log.info(f"📣 Отправлено сообщение о восстановлении: {subject[:60]}")
+    else:
+        history_log.warning(f"⚠️ Не удалось отправить восстановление: {error}")
 
 
 # ============================================================================
@@ -1176,11 +1683,108 @@ async def api_status(request: web.Request) -> web.Response:
     })
 
 
+async def api_default_chat(request: web.Request) -> web.Response:
+    """
+    Чат по умолчанию — резервный адрес для уведомлений без указания канала.
+
+        GET  /api/default-chat — текущее значение
+        POST /api/default-chat — изменить: {"chat_id": "...", "chat_title": "..."}
+
+    Пустой chat_id очищает значение (уведомления без канала будут отклоняться).
+    """
+    if request.method == "GET":
+        current = state_manager.default_chat
+
+        # Список чатов, которые уже используются каналами: выбрать готовый
+        # проще и безопаснее, чем вводить 40-символьный хеш вручную.
+        options: List[Dict[str, Any]] = []
+        seen: Dict[str, Dict[str, Any]] = {}
+        for name, info in state_manager.notification_channels.items():
+            chat_id = str(info.get("chat_id") or "")
+            if not chat_id:
+                continue
+            entry = seen.get(chat_id)
+            if entry is None:
+                entry = {
+                    "chat_id": chat_id,
+                    "chat_title": info.get("chat_title") or None,
+                    "channels": [],
+                }
+                seen[chat_id] = entry
+                options.append(entry)
+            entry["channels"].append(name)
+
+        # Текущий чат может не совпадать ни с одним каналом
+        if current and current not in seen:
+            options.insert(0, {
+                "chat_id": current,
+                "chat_title": None,
+                "channels": [],
+                "orphan": True,
+            })
+
+        options.sort(key=lambda item: (item["chat_id"] != current, item["chat_id"]))
+
+        return web.json_response({
+            "chat_id": current,
+            "chat_title": state_manager.raw.get("default_chat_title"),
+            "options": options,
+            "channels_using": sum(
+                1
+                for info in state_manager.notification_channels.values()
+                if info.get("chat_id") == current
+            ),
+        })
+
+    if request.method == "POST":
+        payload = await request.json()
+        chat_id = str(payload.get("chat_id", "") or "").strip()
+        chat_title = str(payload.get("chat_title", "") or "").strip()
+
+        previous = state_manager.default_chat
+
+        if not chat_id:
+            state_manager.default_chat = None
+            await state_manager.save()
+            logger.warning("📌 Чат по умолчанию очищен — уведомления без канала отклоняются")
+            return web.json_response({
+                "status": "ok",
+                "chat_id": None,
+                "previous": previous,
+            })
+
+        if len(chat_id) < 8:
+            return web.json_response(
+                {"error": "chat_id выглядит слишком коротким"}, status=400
+            )
+
+        state_manager.default_chat = chat_id
+        if chat_title:
+            state_manager._state["default_chat_title"] = chat_title
+        await state_manager.save()
+
+        logger.info(
+            f"📌 Чат по умолчанию изменён: {previous or '—'} → {chat_id}"
+            + (f" ({chat_title})" if chat_title else "")
+        )
+        return web.json_response({
+            "status": "ok",
+            "chat_id": chat_id,
+            "chat_title": chat_title or None,
+            "previous": previous,
+        })
+
+    return web.json_response({"error": "method not allowed"}, status=405)
+
+
 async def api_channels(request: web.Request) -> web.Response:
     if request.method == "GET":
         return web.json_response({
             "channels": state_manager.notification_channels,
             "default_chat": state_manager.default_chat,
+            "default_chat_title": state_manager.raw.get("default_chat_title"),
+            # Глобальный режим — чтобы панель показала «наследует …»
+            "incident_mode": state_manager.settings.get("incident_mode", "notify"),
         })
 
     if request.method == "POST":
@@ -1239,6 +1843,21 @@ async def api_channel_item(request: web.Request) -> web.Response:
         )
         if not ok:
             return web.json_response({"error": f"имя '{new_name}' уже занято"}, status=409)
+
+        # Режим инцидентов для канала: пустое значение — наследовать глобальный
+        if "incident_mode" in payload:
+            raw_mode = str(payload.get("incident_mode") or "").strip().lower()
+            if raw_mode and raw_mode not in INCIDENT_MODES:
+                return web.json_response(
+                    {
+                        "error": f"недопустимый режим: {raw_mode}",
+                        "allowed": list(INCIDENT_MODES),
+                    },
+                    status=400,
+                )
+            await state_manager.set_channel_incident_mode(
+                new_name or name, raw_mode or None
+            )
 
         await state_manager.save()
         return web.json_response({"status": "ok", "name": new_name or name})
@@ -1300,6 +1919,23 @@ async def api_settings(request: web.Request) -> web.Response:
                 state_manager.settings[key] = caster(payload[key])
             except (TypeError, ValueError):
                 return web.json_response({"error": f"некорректное значение {key}"}, status=400)
+
+    # Режим реакции на восстановление проверяем отдельно: строковое значение
+    if "incident_mode" in payload:
+        mode = str(payload["incident_mode"] or "").strip().lower()
+        if mode not in INCIDENT_MODES:
+            return web.json_response(
+                {
+                    "error": f"недопустимый режим: {mode}",
+                    "allowed": list(INCIDENT_MODES),
+                },
+                status=400,
+            )
+        state_manager.settings["incident_mode"] = mode
+        # Для режимов с удалением включаем удаление автоматически,
+        # иначе пользователь удивляется, что «ничего не произошло»
+        if mode in ("delete", "both"):
+            state_manager.settings["delete_messages_enabled"] = True
     state_manager.touch()
     await state_manager.save()
     return web.json_response({"status": "ok", "settings": state_manager.settings})
@@ -1322,7 +1958,7 @@ async def api_send(request: web.Request) -> web.Response:
             return web.json_response({"error": "чат по умолчанию не задан"}, status=400)
 
     started = time.perf_counter()
-    ok, error = await deliver_message(chat_id, text, channel)
+    ok, error, sent_id = await deliver_message(chat_id, text, channel)
     latency = round((time.perf_counter() - started) * 1000)
     if not ok:
         return web.json_response({"error": error, "latency_ms": latency}, status=503)
@@ -1356,6 +1992,246 @@ async def api_reconnect(request: web.Request) -> web.Response:
         return web.json_response({"error": "бот не запущен"}, status=503)
     await runner.force_restart("webui")
     return web.json_response({"status": "ok"})
+
+
+def service_restart_mode() -> str:
+    """
+    Как перезапускать службу: через systemctl или собственным выходом.
+
+    Внутри контейнера systemd нет — systemctl отсутствует, и вызов
+    бесполезен. Там правильный способ — завершить процесс: контейнер
+    поднимется заново благодаря restart: unless-stopped.
+    """
+    mode = (SERVICE_RESTART_MODE or "auto").lower()
+    if mode in ("systemd", "exit"):
+        return mode
+    # auto
+    if os.getenv("container") or Path("/.dockerenv").exists():
+        return "exit"
+    return "systemd"
+
+
+async def api_service_restart(request: web.Request) -> web.Response:
+    """
+    Перезапуск службы из панели.
+
+        POST /api/service/restart   {"confirm": "restart"}
+
+    Выключено по умолчанию (SERVICE_RESTART_ENABLED). Требует прав
+    администратора и явного подтверждения в теле запроса — чтобы случайный
+    клик или чужой скрипт не перезапускал сервис.
+
+    Процесс завершается по команде systemd; панель в этот момент недоступна
+    несколько секунд.
+    """
+    if not SERVICE_RESTART_ENABLED:
+        return web.json_response(
+            {
+                "error": "перезапуск из панели выключен",
+                "hint": "включите SERVICE_RESTART_ENABLED=true в .env",
+            },
+            status=403,
+        )
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if str(payload.get("confirm", "")).lower() != "restart":
+        return web.json_response(
+            {"error": "нужно подтверждение", "hint": 'передайте {"confirm": "restart"}'},
+            status=400,
+        )
+
+    mode = service_restart_mode()
+
+    if mode == "systemd" and not SYSTEMD_SERVICE:
+        return web.json_response({"error": "не задано имя службы"}, status=400)
+
+    logger.warning(
+        f"🔄 Перезапуск из панели управления (режим: {mode})"
+        + (f", служба {SYSTEMD_SERVICE}" if mode == "systemd" else "")
+    )
+
+    # Запускаем в фоне: ответ должен уйти до остановки процесса,
+    # иначе браузер получит обрыв вместо внятного сообщения.
+    asyncio.create_task(_restart_service_task(mode))
+    return web.json_response({
+        "status": "ok",
+        "mode": mode,
+        "service": SYSTEMD_SERVICE if mode == "systemd" else None,
+        "note": "перезапуск запущен, панель будет доступна через несколько секунд",
+    })
+
+
+async def _restart_service_task(mode: str = "systemd") -> None:
+    """
+    Перезапускает бота, дождавшись отправки ответа.
+
+    systemd — через systemctl restart.
+    exit    — завершаем процесс: в контейнере с restart: unless-stopped
+              он поднимется заново. Это единственный работающий способ
+              внутри Docker, где systemctl отсутствует.
+    """
+    await asyncio.sleep(1.0)
+
+    if mode == "exit":
+        logger.warning("🔄 Завершаю процесс для перезапуска контейнера")
+        try:
+            # Штатная остановка: сохраняем состояние, метрики, реестр
+            await shutdown("service-restart")
+        finally:
+            os._exit(0)
+        return
+
+    try:
+        # Вывод systemctl не перехватываем: он уходит в журнал systemd,
+        # а захват через пайпы в некоторых окружениях запрещён и приводит
+        # к PermissionError — перезапуск при этом не выполнится.
+        process = await asyncio.create_subprocess_exec(
+            SYSTEMCTL_PATH,
+            "restart",
+            SYSTEMD_SERVICE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(process.wait(), timeout=60)
+        if process.returncode != 0:
+            error_log.error(
+                f"❌ Перезапуск службы не удался: systemctl вернул код "
+                f"{process.returncode}. Смотрите журнал: journalctl -u {SYSTEMD_SERVICE} -n 50"
+            )
+    except FileNotFoundError:
+        error_log.error(
+            f"❌ systemctl не найден по пути '{SYSTEMCTL_PATH}'. "
+            f"Укажите SYSTEMCTL_PATH или запускайте бота под systemd."
+        )
+    except asyncio.TimeoutError:
+        error_log.error("❌ Перезапуск службы: systemctl не ответил за 60 секунд")
+    except Exception as exc:
+        error_log.error(f"❌ Ошибка перезапуска службы: {type(exc).__name__}: {exc}", exc_info=exc)
+
+
+async def api_service_status(request: web.Request) -> web.Response:
+    """
+    Состояние управления службой — для панели.
+
+        GET /api/service/status
+    """
+    mode = service_restart_mode()
+    in_container = bool(
+        os.getenv("container") or Path("/.dockerenv").exists()
+    )
+    return web.json_response({
+        "restart_enabled": SERVICE_RESTART_ENABLED,
+        "mode": mode,
+        "service": SYSTEMD_SERVICE,
+        "systemctl": SYSTEMCTL_PATH,
+        "under_systemd": bool(os.getenv("INVOCATION_ID") or os.getenv("SYSTEMD_EXEC_PID")),
+        "in_container": in_container,
+        "note": (
+            "перезапуск через перезапуск контейнера (restart: unless-stopped)"
+            if mode == "exit"
+            else f"перезапуск через systemctl restart {SYSTEMD_SERVICE}"
+        ),
+    })
+
+
+async def api_backups(request: web.Request) -> web.Response:
+    """
+    Резервные копии состояния.
+
+        GET    /api/backups            — список копий и сводка
+        POST   /api/backups            — создать копию вручную
+        POST   /api/backups?action=archive — собрать полный архив
+    """
+    if backup_manager is None:
+        return web.json_response({"error": "резервное копирование не инициализировано"}, status=503)
+
+    if request.method == "GET":
+        return web.json_response({
+            "stats": backup_manager.stats(),
+            "items": backup_manager.list_items(),
+        })
+
+    if request.method == "POST":
+        action = request.query.get("action", "create")
+
+        if action == "archive":
+            path = backup_manager.create_archive()
+            if path is None:
+                return web.json_response({"error": "не удалось создать архив"}, status=500)
+            return web.json_response({
+                "status": "ok",
+                "file": path.name,
+                "size": path.stat().st_size,
+            })
+
+        path = backup_manager.create("manual")
+        if path is None:
+            return web.json_response(
+                {"error": "копия не создана — проверьте файл состояния"}, status=500
+            )
+        return web.json_response({"status": "ok", "file": path.name})
+
+    return web.json_response({"error": "method not allowed"}, status=405)
+
+
+async def api_backup_item(request: web.Request) -> web.Response:
+    """
+    Операции над конкретной копией.
+
+        POST   /api/backups/{name}/restore — восстановить состояние
+        DELETE /api/backups/{name}         — удалить копию
+    """
+    if backup_manager is None:
+        return web.json_response({"error": "резервное копирование не инициализировано"}, status=503)
+
+    name = request.match_info["name"]
+
+    if request.method == "POST":
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if str(payload.get("confirm", "")).lower() != "restore":
+            return web.json_response(
+                {"error": "нужно подтверждение", "hint": 'передайте {"confirm": "restore"}'},
+                status=400,
+            )
+
+        result = backup_manager.restore(name)
+        if not result.get("ok"):
+            return web.json_response({"error": result.get("error")}, status=400)
+        return web.json_response({"status": "ok", **result})
+
+    if request.method == "DELETE":
+        result = backup_manager.delete(name)
+        if not result.get("ok"):
+            return web.json_response({"error": result.get("error")}, status=400)
+        return web.json_response({"status": "ok", **result})
+
+    return web.json_response({"error": "method not allowed"}, status=405)
+
+
+async def backup_scheduler(interval_hours: float) -> None:
+    """Периодически делает резервные копии состояния."""
+    if interval_hours <= 0:
+        logger.info("💾 Автоматические копии выключены (BACKUP_INTERVAL_HOURS=0)")
+        return
+
+    interval = max(60.0, interval_hours * 3600)
+    logger.info(f"💾 Автоматические копии: каждые {interval_hours:g} ч")
+
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            if backup_manager is not None and backup_manager.enabled:
+                backup_manager.create("auto")
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            error_log.error(f"❌ Ошибка резервного копирования: {exc}", exc_info=exc)
 
 
 ALLOWED_LOG_FILES = {"bot.log", "chat.log", "delete.log", "error.log", "error_history.log", "webhook.log"}
@@ -1457,17 +2333,22 @@ async def metrics_collector(interval: float = 60.0, save_interval: float = 300.0
                 continue
 
             health = runner.health() if runner else {}
-            metadata = state_manager.metadata if state_manager else {}
 
+            # Отправки считаются отдельно, при каждом вебхуке — здесь только
+            # состояние: очередь, связь, перезапуски.
             metrics.record_snapshot({
-                "sent": metadata.get("messages_sent", 0),
                 "queued": len(outbox) if outbox is not None else 0,
                 "connected": bool(health.get("ws_connected")),
                 "restarts": health.get("restarts", 0),
             })
 
+            # Сохраняем сразу после каждого снимка, если есть изменения.
+            # Файл небольшой (десятки КБ), а потеря истории при аварийной
+            # остановке процесса заметнее, чем редкая запись на диск.
+            # Раз в save_interval сбрасываем принудительно — на случай,
+            # если события шли только через record_delivery.
             now = time.monotonic()
-            if now - last_save >= save_interval:
+            if metrics.dirty or now - last_save >= save_interval:
                 metrics.save()
                 last_save = now
         except asyncio.CancelledError:
@@ -1506,6 +2387,57 @@ async def api_metrics(request: web.Request) -> web.Response:
 
     if kind == "summary":
         return web.json_response(metrics.summary())
+
+    if kind == "channels":
+        try:
+            hours = int(request.query.get("hours", 24))
+        except ValueError:
+            hours = 24
+        data = metrics.history(hours)
+        return web.json_response({
+            "hours": hours,
+            "channels": data.get("channels", []),
+            "statuses": data.get("statuses", []),
+        })
+
+    if kind == "channel-report":
+        try:
+            hours = int(request.query.get("hours", 24))
+        except ValueError:
+            hours = 24
+        return web.json_response(metrics.channel_report(hours))
+
+    if kind == "statuses":
+        try:
+            hours = int(request.query.get("hours", 24))
+        except ValueError:
+            hours = 24
+        return web.json_response({"hours": hours, "statuses": metrics.status_totals(hours)})
+
+    if kind == "timeline":
+        try:
+            hours = int(request.query.get("hours", 24))
+        except ValueError:
+            hours = 24
+        # bucket=auto или отсутствует — шаг подбирается под период
+        raw_bucket = str(request.query.get("bucket", "auto") or "auto").strip()
+        bucket: Optional[int] = None
+        if raw_bucket.lower() not in ("auto", "", "0"):
+            try:
+                bucket = int(raw_bucket)
+            except ValueError:
+                bucket = None
+        return web.json_response(metrics.timeline(hours, bucket))
+
+    if kind == "severities":
+        try:
+            hours = int(request.query.get("hours", 24))
+        except ValueError:
+            hours = 24
+        return web.json_response({
+            "hours": hours,
+            "severities": metrics.severity_totals(hours),
+        })
 
     return web.json_response({"error": f"неизвестный вид: {kind}"}, status=400)
 
@@ -1554,12 +2486,30 @@ async def handle_page(request: web.Request, page_key: str = "") -> web.Response:
     )
 
 
+def _asset_version() -> str:
+    """
+    Короткий хеш содержимого стилей и скрипта.
+
+    Подставляется в URL как ?v=… — после обновления бота браузер
+    запрашивает свежий файл, а не берёт старый из кеша.
+    """
+    digest = hashlib.sha1(
+        (STYLE_CSS + APP_JS).encode("utf-8", "ignore")
+    ).hexdigest()
+    return digest[:10]
+
+
 async def handle_style(request: web.Request) -> web.Response:
     return web.Response(
         text=STYLE_CSS,
         content_type="text/css",
         charset="utf-8",
-        headers={"Cache-Control": "public, max-age=300"},
+        headers={
+            # Кеш отключён: файлы мелкие и отдаются локально, а устаревшая
+            # копия в браузере скрывает обновления интерфейса.
+            "Cache-Control": "no-store, must-revalidate",
+            "ETag": f'"{_asset_version()}"',
+        },
     )
 
 
@@ -1568,7 +2518,10 @@ async def handle_appjs(request: web.Request) -> web.Response:
         text=APP_JS,
         content_type="application/javascript",
         charset="utf-8",
-        headers={"Cache-Control": "public, max-age=300"},
+        headers={
+            "Cache-Control": "no-store, must-revalidate",
+            "ETag": f'"{_asset_version()}"',
+        },
     )
 
 
@@ -1690,6 +2643,7 @@ async def build_web_app() -> web.Application:
 
     app.router.add_get("/api/status", api_status)
     app.router.add_route("*", "/api/channels", api_channels)
+    app.router.add_route("*", "/api/default-chat", api_default_chat)
     app.router.add_route("*", "/api/channels/{name}", api_channel_item)
     app.router.add_route("*", "/api/admins", api_admins)
     app.router.add_delete("/api/admins/{user_id}", api_admin_delete)
@@ -1701,6 +2655,12 @@ async def build_web_app() -> web.Application:
     app.router.add_route("*", "/api/local-admin", api_local_admin)
     app.router.add_get("/api/diagnostics", api_diagnostics)
     app.router.add_get("/api/metrics", api_metrics)
+    app.router.add_post("/api/service/restart", api_service_restart)
+    app.router.add_get("/api/service/status", api_service_status)
+    app.router.add_get("/api/backups", api_backups)
+    app.router.add_post("/api/backups", api_backups)
+    app.router.add_post("/api/backups/{name}/restore", api_backup_item)
+    app.router.add_delete("/api/backups/{name}", api_backup_item)
     return app
 
 
@@ -1743,8 +2703,15 @@ async def init_runtime_for_tests() -> None:
         dedup_window=OUTBOX_DEDUP_WINDOW,
         enabled=OUTBOX_ENABLED,
     )
-    global metrics
+    global metrics, backup_manager
     metrics = MetricsStore(file_path=METRICS_FILE, enabled=METRICS_ENABLED)
+    backup_manager = BackupManager(
+        state_file=cfg("STATE_FILE", "bot_state.json"),
+        backup_dir=BACKUP_DIR,
+        keep=BACKUP_KEEP,
+        enabled=BACKUP_ENABLED,
+    )
+    _load_delivered()
     admin_manager = AdminManager(
         admin_ids=[item.strip() for item in str(cfg("ADMIN_IDS", "")).split(",") if item.strip()],
         mode=cfg("ADMIN_MODE", "strict"),
@@ -1842,7 +2809,16 @@ def _publish_bot(instance: Bot) -> None:
 async def shutdown(reason: str = "manual") -> None:
     logger.info(f"🛑 Остановка бота ({reason})…")
 
-    global web_runner, _flush_task, _metrics_task
+    global web_runner, _flush_task, _metrics_task, _backup_task
+
+    if _backup_task is not None and not _backup_task.done():
+        _backup_task.cancel()
+        try:
+            await _backup_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _backup_task = None
+
     if _metrics_task is not None and not _metrics_task.done():
         _metrics_task.cancel()
         try:
@@ -1853,6 +2829,8 @@ async def shutdown(reason: str = "manual") -> None:
 
     if metrics is not None:
         metrics.save()
+
+    _save_delivered()
 
     if _flush_task is not None and not _flush_task.done():
         _flush_task.cancel()
@@ -1886,11 +2864,22 @@ async def shutdown(reason: str = "manual") -> None:
 
 async def main() -> None:
     global bot, state_manager, admin_manager, token_manager, runner, start_time, web_runner
-    global outbox, _flush_task, metrics, _metrics_task
+    global outbox, _flush_task, metrics, _metrics_task, backup_manager
 
     start_time = datetime.now()
 
     metrics = MetricsStore(file_path=METRICS_FILE, enabled=METRICS_ENABLED)
+
+    backup_manager = BackupManager(
+        state_file=cfg("STATE_FILE", "bot_state.json"),
+        backup_dir=BACKUP_DIR,
+        keep=BACKUP_KEEP,
+        enabled=BACKUP_ENABLED,
+    )
+
+    # Реестр доставленного — до запуска очереди и вебхуков, иначе первые
+    # же повторные вебхуки создадут дубли
+    _load_delivered()
 
     token_manager = TokenManager(TOKEN_CONFIG)
     state_manager = StateManager(cfg("STATE_FILE", "bot_state.json"), version=VERSION)
@@ -2029,6 +3018,10 @@ async def main() -> None:
         _metrics_task = asyncio.create_task(
             metrics_collector(METRICS_INTERVAL, METRICS_SAVE_INTERVAL),
             name="metrics-collector",
+        )
+    if backup_manager is not None and backup_manager.enabled:
+        _backup_task = asyncio.create_task(
+            backup_scheduler(BACKUP_INTERVAL_HOURS), name="backup-scheduler"
         )
     try:
         ready = await runner.wait_ready(timeout=60)

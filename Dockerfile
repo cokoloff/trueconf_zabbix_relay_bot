@@ -40,10 +40,13 @@ ENV LOG_DIR=/app/logs \
     STATE_FILE=/app/data/bot_state.json \
     TOKEN_FILE=/app/data/bot_token.json \
     OUTBOX_FILE=/app/data/bot_outbox.json \
+    METRICS_FILE=/app/data/bot_metrics.json \
+    DELIVERED_FILE=/app/data/bot_delivered.json \
     LOCAL_ADMIN_PASSWORD_FILE=/app/data/local-admin-initial-password.txt \
     WEB_SERVER_HOST=0.0.0.0 \
     WEB_SERVER_PORT=8080 \
-    TZ=Europe/Moscow
+    TZ=Europe/Moscow \
+    SERVICE_RESTART_MODE=exit
 
 EXPOSE 8080
 

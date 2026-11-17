@@ -32,7 +32,8 @@ logger = logging.getLogger("bot")
 
 
 class OutboxItem:
-    __slots__ = ("id", "chat_id", "channel", "text", "incident_key", "created_at", "attempts", "status")
+    __slots__ = ("id", "chat_id", "channel", "text", "incident_key",
+                 "created_at", "attempts", "status", "severity")
 
     def __init__(
         self,
@@ -44,6 +45,7 @@ class OutboxItem:
         created_at: float,
         attempts: int = 0,
         status: Optional[str] = None,
+        severity: Optional[str] = None,
     ):
         self.id = item_id
         self.chat_id = chat_id
@@ -53,6 +55,7 @@ class OutboxItem:
         self.created_at = created_at
         self.attempts = attempts
         self.status = status
+        self.severity = severity
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -64,6 +67,7 @@ class OutboxItem:
             "created_at": self.created_at,
             "attempts": self.attempts,
             "status": self.status,
+            "severity": self.severity,
         }
 
     @classmethod
@@ -77,6 +81,7 @@ class OutboxItem:
             created_at=float(data.get("created_at", time.time())),
             attempts=int(data.get("attempts", 0)),
             status=data.get("status"),
+            severity=data.get("severity"),
         )
 
     def age_hours(self) -> float:
@@ -174,6 +179,7 @@ class Outbox:
         incident_key: Optional[str] = None,
         status: Optional[str] = None,
         collapse: bool = False,
+        severity: Optional[str] = None,
     ) -> Optional[OutboxItem]:
         """
         Ставит сообщение в очередь. Возвращает элемент или None, если не принято
@@ -227,6 +233,7 @@ class Outbox:
                 incident_key=incident_key,
                 created_at=now,
                 status=status,
+                severity=severity,
             )
             self._items.append(item)
             self.enqueued += 1

@@ -40,6 +40,12 @@ class StateManager:
         self._state.setdefault("admins", [])
         self._state.setdefault("error_history", {})
         self._state.setdefault("settings", {
+            # Режим реакции на восстановление:
+            # delete — удалить сообщение о проблеме
+            # resolve — отправить сообщение «восстановлено»
+            # both — и удалить, и отправить
+            # notify — только записать в историю
+            "incident_mode": "notify",
             "delete_messages_enabled": False,
             "error_delete_threshold_hours": 24,
             "error_history_retention_days": 7,
@@ -145,6 +151,42 @@ class StateManager:
             self._dirty = True
         logger.info(f"📢 Канал '{name}' создан (chat_id={chat_id[:8]}…)")
 
+    def channel_incident_mode(self, name: Optional[str]) -> Optional[str]:
+        """
+        Режим реакции на восстановление для канала.
+
+        None — канал не имеет своей настройки, действует глобальная.
+        """
+        if not name:
+            return None
+        info = self.notification_channels.get(name) or {}
+        mode = info.get("incident_mode")
+        return str(mode).lower() if mode else None
+
+    async def set_channel_incident_mode(
+        self, name: str, mode: Optional[str]
+    ) -> bool:
+        """Задаёт режим канала. Пустое значение — наследовать глобальный."""
+        async with self.lock:
+            current = self.notification_channels.get(name)
+            if current is None:
+                return False
+
+            updated = dict(current)
+            if mode:
+                updated["incident_mode"] = str(mode).lower()
+            else:
+                updated.pop("incident_mode", None)
+            updated["updated_at"] = datetime.now().isoformat()
+            self.notification_channels[name] = updated
+            self._dirty = True
+
+        logger.info(
+            f"✏️ Канал '{name}': режим инцидентов "
+            f"{mode or 'наследует глобальный'}"
+        )
+        return True
+
     async def update_channel(
         self,
         name: str,
@@ -211,12 +253,46 @@ class StateManager:
         return self._state["error_history"]
 
     async def remember_error(self, key: str, message_id: str, channel: Optional[str]) -> None:
+        """
+        Запоминает открытый инцидент.
+
+        Zabbix повторяет один и тот же PROBLEM несколько раз — каждое
+        уведомление уходит в чат отдельным сообщением. Раньше запись
+        перезаписывалась и сохранялся только последний message_id: при
+        решении удалялось одно сообщение, а остальные оставались в чате.
+
+        Теперь копим ВСЕ идентификаторы, чтобы удалить весь мусор.
+        """
         async with self.lock:
+            existing = self.error_history.get(key)
+
+            if existing is not None:
+                # Инцидент уже открыт — дополняем, а не замещаем
+                messages = list(existing.get("message_ids") or [])
+                old_single = existing.get("message_id")
+                if old_single and old_single not in messages:
+                    messages.append(old_single)
+
+                if message_id and message_id not in messages:
+                    messages.append(message_id)
+
+                existing["message_ids"] = messages
+                existing["message_id"] = message_id or existing.get("message_id")
+                existing["repeat_count"] = int(existing.get("repeat_count", 1)) + 1
+                existing["last_seen_at"] = datetime.now().isoformat()
+                if channel:
+                    existing["channel"] = channel
+                self._prune_history()
+                self._dirty = True
+                return
+
             self.error_history[key] = {
                 "message_id": message_id,
+                "message_ids": [message_id] if message_id else [],
                 "channel": channel,
                 "opened_at": datetime.now().isoformat(),
                 "resolved_at": None,
+                "repeat_count": 1,
             }
             self._prune_history()
             self._dirty = True
